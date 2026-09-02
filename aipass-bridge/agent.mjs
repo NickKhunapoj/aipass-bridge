@@ -79,6 +79,10 @@ const existsAt = (abs) => overlay.has(abs) || fs.existsSync(abs);
 const SKIP = new Set(['node_modules', '.git', '.next', 'dist', 'build', '.cache']);
 
 const clip = (s) => (s.length > MAX_RESULT ? `${s.slice(0, MAX_RESULT)}\n… truncated` : s);
+// Paths that go to the model come back from it, in a NEED file or an EDIT. On
+// Windows path.relative yields `src\a.ts`, so normalise to one separator
+// everywhere rather than teaching the model two shapes.
+const posix = (p) => p.split(path.sep).join('/');
 const READ_LINES = Number(flag('read-lines', 250));
 
 // read() shows a line-number gutter so the model can reference ranges. Those
@@ -227,7 +231,7 @@ const TOOLS = {
         const lines = text.split('\n');
         for (let i = 0; i < lines.length && hits.length < MAX; i++) {
           if (lines[i].includes(needle)) {
-            hits.push(`${path.relative(ROOT, full)}:${i + 1}: ${lines[i].trim().slice(0, 140)}`);
+            hits.push(`${posix(path.relative(ROOT, full))}:${i + 1}: ${lines[i].trim().slice(0, 140)}`);
           }
         }
       }

@@ -86,6 +86,11 @@ async function ask(text) {
 
 if (question) {
   await ask(question);
+  // process.exit() drops a stdout write libuv has not finished, which on
+  // Windows aborts with 0xC0000409 rather than exiting 0. Flush first. The
+  // explicit exit stays: Node's fetch holds a pooled socket open and would
+  // otherwise keep the process alive for seconds after the answer is printed.
+  await new Promise((resolve) => stdout.write('', resolve));
   process.exit(0);
 }
 
