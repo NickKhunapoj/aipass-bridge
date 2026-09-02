@@ -236,6 +236,49 @@ providers:
 
 ---
 
+### 7. 🖼️ Multimodal Vision (Image Input) Support
+
+`aipass-bridge` supports OpenAI-compatible vision requests (`image_url` with Base64 Data URIs or Remote URLs).
+
+#### Python Vision Example:
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="sk-dummy")
+
+with open("image.png", "rb") as f:
+    b64_image = base64.b64encode(f.read()).decode("utf-8")
+
+response = client.chat.completions.create(
+    model="gemini-3.7-flash",  # or gemini-3.1-flash-lite, claude-sonnet-5@default
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image in detail."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
+            ]
+        }
+    ]
+)
+print(response.choices[0].message.content)
+```
+
+#### CLI Vision Test Script:
+```bash
+# Test with built-in test image:
+python3 test-vision.py test_real.png --model gemini-3.1-flash-lite
+
+# Test with streaming:
+python3 test-vision.py test_real.png --model gemini-3.7-flash --stream
+
+# Test with remote URL:
+python3 test-vision.py --url "https://example.com/photo.jpg" --prompt "What is this?"
+```
+
+---
+
 ## 💻 Local Desktop Setup (Without Docker)
 
 If you prefer running directly on macOS, Windows, or Linux desktop:

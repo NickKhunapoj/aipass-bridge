@@ -47,4 +47,16 @@ else
 fi
 
 echo ""
+echo "🖼️ 4. Testing Multimodal Vision (test-vision.py)..."
+if [ -f "test-vision.py" ]; then
+    if [ -f "test_real.png" ]; then
+        python3 test-vision.py test_real.png --model "gemini-3.1-flash-lite"
+    else
+        python3 test-vision.py --model "gemini-3.1-flash-lite"
+    fi
+else
+    echo "ℹ️ test-vision.py not found, skipping vision test."
+fi
+
+echo ""
 echo "============================================================"

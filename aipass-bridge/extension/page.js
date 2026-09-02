@@ -17,12 +17,29 @@
   // so a compromised bridge cannot turn this into a general request forwarder.
   async function runLoader(job) {
     try {
-      if (!/^\/loaders\/[A-Za-z0-9._~-]+(\.data)?(\?|$)/.test(job.url)) {
-        throw new Error(`refusing non-loader path: ${job.url}`);
+      if (!/^\/(loaders|assets)\/[A-Za-z0-9._~-]+(\.data)?(\?|$)/.test(job.url)) {
+        throw new Error(`refusing non-loader/asset path: ${job.url}`);
       }
       const res = await fetch(job.url, { credentials: 'include', headers: { accept: '*/*' } });
       if (!res.ok) throw new Error(`aipass returned ${res.status} ${res.statusText}`);
       reply({ jobId: job.jobId, kind: 'loader', raw: await res.text() });
+    } catch (err) {
+      reply({ jobId: job.jobId, kind: 'loader', message: String(err?.message ?? err) });
+    }
+  }
+  async function runInspect(job) {
+    try {
+      const res = await fetch('/assets/use-video-style-selection-DgXWZrL8.js');
+      const text = await res.text();
+      const target = '/actions/upload-file/confirm';
+      const idx = text.indexOf(target);
+      const snippet = idx !== -1 ? text.slice(Math.max(0, idx - 500), Math.min(text.length, idx + 2000)) : `TARGET NOT FOUND in ${text.length} chars`;
+
+      reply({
+        jobId: job.jobId,
+        kind: 'loader',
+        raw: JSON.stringify({ snippet })
+      });
     } catch (err) {
       reply({ jobId: job.jobId, kind: 'loader', message: String(err?.message ?? err) });
     }
@@ -56,6 +73,81 @@
     }
   }
 
+  function dataUrlToBlob(dataUrl) {
+    const arr = dataUrl.split(',');
+    const mimeMatch = arr[0].match(/:(.*?);/);
+    const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+  }
+
+  async function uploadFileHelper(blob, filename, contentType, conversationId, modelId, signal) {
+    const initRes = await fetch('/actions/upload-file/initiate', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversationId,
+        filename,
+        contentFilename: filename,
+        contentType,
+        sizeBytes: blob.size,
+        ...(modelId ? { modelId } : {})
+      }),
+      signal
+    });
+    if (!initRes.ok) {
+      const errText = await initRes.text().catch(() => '');
+      throw new Error(`upload initiate failed: ${initRes.status} ${errText}`);
+    }
+    const initData = await initRes.json();
+    if (initData.error) throw new Error(initData.error);
+    if (!initData.uploadUrl || !initData.uploadToken || !initData.storageKey) {
+      throw new Error('invalid upload initiate response');
+    }
+
+    const putHeaders = { 'Content-Type': contentType };
+    if (initData.sizeBytes != null) {
+      putHeaders['x-goog-content-length-range'] = `${initData.sizeBytes},${initData.sizeBytes}`;
+      putHeaders['x-goog-if-generation-match'] = '0';
+    }
+    const putRes = await fetch(initData.uploadUrl, {
+      method: 'PUT',
+      headers: putHeaders,
+      body: blob,
+      signal
+    });
+    if (!putRes.ok && putRes.status !== 412) {
+      throw new Error(`direct upload PUT failed: ${putRes.status}`);
+    }
+
+    const confirmRes = await fetch('/actions/upload-file/confirm', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        uploadToken: initData.uploadToken
+      }),
+      signal
+    });
+    if (!confirmRes.ok) {
+      const errText = await confirmRes.text().catch(() => '');
+      throw new Error(`upload confirm failed: ${confirmRes.status} ${errText}`);
+    }
+    const confirmData = await confirmRes.json();
+    if (confirmData.error) throw new Error(confirmData.error);
+
+    return {
+      storageKey: confirmData.storageKey || initData.storageKey,
+      downloadUrl: confirmData.downloadUrl || confirmData.url || initData.downloadUrl || initData.url || ''
+    };
+  }
+
   async function run(job) {
     const controller = new AbortController();
     inflight.set(job.jobId, controller);
@@ -72,8 +164,53 @@
     const push = (kind, text) => { if (text) buffer.push({ kind, text }); };
 
     try {
-      // One user message, matching what the web UI sends. The server holds the
-      // conversation history.
+      // Process parts: upload any image blobs and get their storageKey
+      const processedParts = [];
+      if (Array.isArray(job.parts) && job.parts.length > 0) {
+        for (const p of job.parts) {
+          if (p.type === 'image' || p.type === 'file') {
+            const rawUrl = p.image || p.url || p.data || '';
+            let mediaType = p.mediaType || 'image/jpeg';
+            let blob = null;
+            if (rawUrl.startsWith('data:')) {
+              blob = dataUrlToBlob(rawUrl);
+              mediaType = blob.type || mediaType;
+            } else if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+              const f = await fetch(rawUrl, { signal: controller.signal });
+              blob = await f.blob();
+              mediaType = blob.type || mediaType;
+            }
+            if (blob) {
+              const ext = (mediaType.split('/')[1] || 'jpeg').replace(/^jpeg$/, 'jpg');
+              const filename = p.filename || `image.${ext}`;
+              push('status', `[upload] uploading image (${(blob.size / 1024).toFixed(1)} KB)...`);
+              const uploadRes = await uploadFileHelper(
+                blob,
+                filename,
+                mediaType,
+                job.conversationId,
+                job.modelId,
+                controller.signal
+              );
+              processedParts.push({
+                type: 'file',
+                mediaType,
+                filename,
+                url: uploadRes.storageKey,
+                storageKey: uploadRes.storageKey,
+              });
+            }
+          } else {
+            processedParts.push({
+              type: 'text',
+              text: typeof p.text === 'string' ? p.text : String(p),
+            });
+          }
+        }
+      } else {
+        processedParts.push({ type: 'text', text: job.text });
+      }
+
       const body = JSON.stringify({
         modelId: job.modelId,
         imageAspectRatio: '1:1',
@@ -81,7 +218,7 @@
           id: crypto.randomUUID(),
           role: 'user',
           metadata: { modelId: job.modelId },
-          parts: [{ type: 'text', text: job.text }],
+          parts: processedParts,
         }],
       });
 
@@ -94,7 +231,7 @@
       });
 
       if (!res.ok) {
-        const detail = (await res.text().catch(() => '')).slice(0, 300);
+        const detail = (await res.text().catch(() => '')).slice(0, 500);
         // A bare HTML error means an edge proxy blocked us before the app saw
         // the request; these headers say which one.
         const forensics = ['server', 'via', 'cf-ray', 'retry-after']
@@ -103,7 +240,7 @@
           .map(([h, v]) => `${h}=${v}`)
           .join(' ');
         throw new Error(
-          `aipass returned ${res.status} ${res.statusText} [${body.length} bytes]` +
+          `aipass returned ${res.status} ${res.statusText} [${body.length} bytes] [payload: ${body}]` +
           `${forensics ? ` {${forensics}}` : ''}${detail ? ` — ${detail}` : ''}`
         );
       }
@@ -194,7 +331,7 @@
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg[TAG] === 'req') {
-      const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'create' ? runCreate : run;
+      const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'inspect' ? runInspect : msg.job.kind === 'create' ? runCreate : run;
       fn(msg.job);
     }
     else if (msg[TAG] === 'abort') inflight.get(msg.jobId)?.abort();

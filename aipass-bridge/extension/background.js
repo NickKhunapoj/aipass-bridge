@@ -58,23 +58,21 @@ function waitForComplete(tabId, timeoutMs = 15_000) {
   });
 }
 
-// A tab opened before the extension was loaded or reloaded has no content
-// script in it, and Chrome's memory saver can discard one entirely. Rather
-// than telling the user to reload, put the scripts back.
 async function ensureContentScript(tab) {
   const ping = () => chrome.tabs.sendMessage(tab.id, { type: 'ping' });
-  try { await ping(); return; } catch { /* not there yet */ }
+  let ok = false;
+  try { await ping(); ok = true; } catch { /* not there yet */ }
 
-  if (tab.discarded || tab.status === 'unloaded') {
+  if (!ok && (tab.discarded || tab.status === 'unloaded')) {
     await chrome.tabs.reload(tab.id);
     await waitForComplete(tab.id);
-    try { await ping(); return; } catch { /* fall through to injection */ }
   }
 
-  // page.js first: content.js relays to it.
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', files: ['page.js'] });
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'ISOLATED', files: ['content.js'] });
-  await ping();
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', files: ['page.js'] }).catch(() => {});
+  if (!ok) {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'ISOLATED', files: ['content.js'] }).catch(() => {});
+    await ping();
+  }
 }
 
 async function handleJob(job) {
@@ -102,6 +100,13 @@ function handleEvent(name, data) {
     const tabId = jobTabs.get(data.jobId);
     if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'abort', jobId: data.jobId }).catch(() => {});
     jobTabs.delete(data.jobId);
+  } else if (name === 'reload_extension') {
+    try { chrome.runtime.reload(); } catch { /* ignore */ }
+  } else if (name === 'reload_tab') {
+    (async () => {
+      const tab = await findChatTab();
+      if (tab) chrome.tabs.reload(tab.id).catch(() => {});
+    })();
   }
 }
 
