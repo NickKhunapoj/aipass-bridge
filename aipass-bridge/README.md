@@ -186,10 +186,19 @@ same way the web UI does.
 npm run agent -- "add a health route that returns ok" --root .
 ```
 
-Dry run by default: edits go to an in-memory overlay so the model can read back
-its own pending work, you get a unified diff at the end, and nothing touches
-disk until `--apply`. Paths are confined to `--root`; shell access needs
-`--allow-run`.
+Nothing is written until you say so. Edits go to an in-memory overlay, so the
+model can read back its own pending work; at the end you get a unified diff and
+then the question:
+
+```
+apply 2 change(s)? [y/N]
+```
+
+Answer `y` and the overlay is written as shown — one run, one cost, and what you
+approved is exactly what lands. Answer anything else and the disk is untouched.
+`--apply` skips the question for scripted runs, and a non-interactive run with
+no answer available falls back to writing nothing. Paths are confined to
+`--root`; shell access needs `--allow-run`.
 
 ### Actions the agent understands
 
@@ -305,8 +314,8 @@ extension, bridge, and conversation flow are all healthy.
 npm run agent -- "Create index.html: a self-contained todo app with inline CSS and JS. Add, complete, delete todos, persist to localStorage. Clean, modern look." --root ~/Desktop/agent-test
 ```
 
-You see the whole file as a `+` diff; nothing is written. Add `--apply` to write
-it, then `open ~/Desktop/agent-test/index.html`.
+You see the whole file as a `+` diff, then `apply 1 change(s)? [y/N]`. Answer
+`y` and then `open ~/Desktop/agent-test/index.html`.
 
 **3. Edit an existing file — exercises `EDIT` / `FIND` / `NEW`.**
 
@@ -420,7 +429,7 @@ chat. Only the last user message is forwarded.
 npm test
 ```
 
-37 tests, no dependencies, about 2 seconds. `test/harness.mjs` runs the real
+53 tests, no dependencies, a few seconds. `test/harness.mjs` runs the real
 bridge as a subprocess and a scriptable stand-in for the extension, so tests
 drive the actual HTTP surface and the real CLIs rather than mocks of them.
 

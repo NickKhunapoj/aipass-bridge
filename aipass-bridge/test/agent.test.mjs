@@ -76,6 +76,35 @@ test('dry run shows a diff but writes nothing; --apply writes', async (t) => {
   assert.equal(fs.readFileSync(path.join(wet, 'b.txt'), 'utf8'), 'brand new');
 });
 
+test('a dry run offers to apply, and answering y writes the files', async (t) => {
+  const replies = [
+    'EDIT a.txt\nFIND\nhello\nNEW\ngoodbye\nEND\nCREATE b.txt\nbrand new\nEND',
+    'DONE changed things',
+  ];
+  const dir = tempDir({ 'a.txt': 'hello' });
+  const ext = await new FakeExtension(bridge.base, { onChat: scripted(replies) }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { stdin: [[300, 'y\n']] });
+  assert.match(out, /apply 2 change\(s\)\?/, 'the diff must be followed by an offer to write it');
+  assert.match(out, /wrote 2 file\(s\)/);
+  // The point of the prompt: one run, and what was shown is what landed.
+  assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'goodbye');
+  assert.equal(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8'), 'brand new');
+});
+
+test('declining the apply prompt leaves the disk untouched', async (t) => {
+  const replies = ['CREATE b.txt\nbrand new\nEND', 'DONE made a file'];
+  const dir = tempDir({ 'a.txt': 'hello' });
+  const ext = await new FakeExtension(bridge.base, { onChat: scripted(replies) }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { stdin: [[300, 'n\n']] });
+  assert.match(out, /apply 1 change\(s\)\?/);
+  assert.match(out, /nothing written/);
+  assert.ok(!fs.existsSync(path.join(dir, 'b.txt')));
+});
+
 test('an edit whose FIND text does not match is reported, not applied', async (t) => {
   const dir = tempDir({ 'a.txt': 'hello' });
   const ext = await new FakeExtension(bridge.base, {
