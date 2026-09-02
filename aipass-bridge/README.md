@@ -112,6 +112,9 @@ Ctrl+C quits.
 | `npm run conversations` | list conversations and which is in use |
 | `npm run credits` | how much of the credit pool is left |
 | `npm run doctor` | check every link in the chain and name what is broken |
+
+Every script takes `--help`. Note the `--` separator: `npm run doctor --help`
+prints *npm's* help, `npm run doctor -- --help` prints the script's.
 | `npm test` | run the test suite |
 
 `npm run dev:next` still starts the Next.js app in this repo.

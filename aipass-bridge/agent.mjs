@@ -47,16 +47,25 @@ const WATCH = has('watch');
 // pass the id through. Implies --slim, since the assistant carries the protocol.
 const ASSISTANT = flag('assistant', process.env.AIPASS_ASSISTANT_ID || null);
 
-if (!task) {
-  console.error(`usage: npm run agent -- "<task>" [options]
+const HELP = has('help') || argv.includes('-h');
+
+if (!task || HELP) {
+  // Asking for help is not an error, so it leaves with 0; a missing task is.
+  const out = HELP ? console.log : console.error;
+  out(`usage: npm run agent -- "<task>" [options]
 
   --root DIR      project root the agent may touch   (default: cwd)
   --model ID      model id                           (default: bridge default)
   --apply         write without asking               (default: ask after the diff)
   --allow-run     let the agent run shell commands   (default: off)
   --max N         max steps                          (default: 10)
-  --max-result N  truncate each tool result          (default: 3000 bytes)`);
-  process.exit(1);
+  --max-result N  truncate each tool result          (default: 3000 bytes)
+  --watch         stay open for follow-up tasks on the same conversation
+  --reuse         continue the most recent conversation instead of a new one
+  --conversation ID   continue a specific conversation
+  --assistant ID  bind new conversations to a custom aipass assistant
+  --bridge URL    bridge base URL                    (default: http://127.0.0.1:8787)`);
+  process.exit(HELP ? 0 : 1);
 }
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;

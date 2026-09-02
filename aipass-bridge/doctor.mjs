@@ -24,7 +24,7 @@ Exits 0 when every check passes, 1 otherwise.`);
 }
 
 const BRIDGE = (flag('bridge', process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787')).replace(/\/+$/, '');
-const FORCE_CHAT = argv.includes('chat') || argv.includes('--chat');
+const FORCE_CHAT = argv.includes('--chat');
 const NO_CHAT = argv.includes('--no-chat');
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;

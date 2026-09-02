@@ -57,3 +57,22 @@ test('--no-chat skips the round trip', async (t) => {
   assert.equal(code, 0);
   assert.match(out, /– round trip\s+skipped \(--no-chat\)/);
 });
+
+// Asking for help is not an error, and `npm run models -- --help` puts the flag
+// after the subcommand — both of which were wrong when --help was first added.
+test('every CLI answers --help and exits 0', async () => {
+  const { AGENT, CHAT } = await import('./harness.mjs');
+  const LIST = DOCTOR.replace('doctor.mjs', 'list.mjs');
+
+  for (const [name, script, args] of [
+    ['doctor', DOCTOR, ['--help']],
+    ['chat', CHAT, ['--help']],
+    ['agent', AGENT, ['--help']],
+    ['list', LIST, ['--help']],
+    ['list after a subcommand', LIST, ['models', '--help']],
+  ]) {
+    const { code, out } = await run(script, args);
+    assert.equal(code, 0, `${name} should exit 0, got ${code}`);
+    assert.match(out, /usage:/, `${name} should print usage`);
+  }
+});
