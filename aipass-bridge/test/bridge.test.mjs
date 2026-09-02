@@ -89,17 +89,51 @@ test('rejects a request carrying no user message', async () => {
   await ext.disconnect();
 });
 
-test('discovers models, marks free credit, and drops media generators', async () => {
+test('lists every model the account can pick, tagged by kind', async () => {
   const ext = await new FakeExtension(bridge.base).connect();
   await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
 
   const { data } = await (await fetch(`${bridge.base}/v1/models`)).json();
-  const ids = data.map((m) => m.id);
-  assert.ok(ids.includes('gemini-3.1-flash-lite'));
-  assert.ok(ids.includes('claude-sonnet-5@default'));
-  assert.ok(!ids.includes('veo-3.1-fast-generate-001'), 'video model should be filtered out');
+  const kind = (id) => data.find((m) => m.id === id)?.kind;
+  assert.equal(kind('gemini-3.1-flash-lite'), 'chat');
+  assert.equal(kind('gpt-image-2'), 'image');
+  assert.equal(kind('gemini-3-pro-image'), 'image', 'a name ending in -image is an image model');
+  assert.equal(kind('veo-3.1-fast-generate-001'), 'video');
+  assert.equal(kind('lyria-3-pro-preview'), 'music');
+  assert.equal(kind('sonar-deep-research'), 'research');
+  // Web search on the way to a conversational answer is not the deep-research tab.
+  assert.equal(kind('sonar-reasoning-pro'), 'chat');
   assert.equal(data.find((m) => m.id === 'gemini-3.1-flash-lite').free_credit, true);
+
+  // ready but selectable:false — the web UI does not offer it, so neither do we
+  assert.equal(kind('openthai2.0-legal@jts'), undefined, 'a non-selectable model must not be listed');
   await ext.disconnect();
+});
+
+test('?kind narrows the list the way the web UI tabs do', async () => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
+
+  const images = await (await fetch(`${bridge.base}/v1/models?kind=image`)).json();
+  assert.deepEqual(images.data.map((m) => m.id).sort(), ['gemini-3-pro-image', 'gpt-image-2']);
+
+  const both = await (await fetch(`${bridge.base}/v1/models?kind=image,video`)).json();
+  assert.equal(both.data.length, 3);
+  await ext.disconnect();
+});
+
+test('AIPASS_MODEL_FILTER=chat restores the text-only list', async (t) => {
+  const solo = await startBridge({ AIPASS_MODEL_FILTER: 'chat' });
+  t.after(() => solo.stop());
+  const ext = await new FakeExtension(solo.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${solo.base}/v1/models?refresh=1`)).json()).data.length > 1);
+
+  const ids = (await (await fetch(`${solo.base}/v1/models`)).json()).data.map((m) => m.id);
+  assert.ok(ids.includes('gemini-3.1-flash-lite'));
+  assert.ok(!ids.includes('gpt-image-2'), 'image models are dropped under the chat filter');
+  assert.ok(!ids.includes('veo-3.1-fast-generate-001'));
+  assert.ok(ids.includes('sonar-deep-research'), 'research still answers as text');
 });
 
 test('picks the most recent conversation and rotates past one that is locked', async () => {

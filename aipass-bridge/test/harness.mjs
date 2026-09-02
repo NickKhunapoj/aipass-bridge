@@ -114,10 +114,19 @@ export const quotaFixture = ({ limit = '10000000000', used = '167042858', availa
     videoQuotaStatus: { count: { limit: 10, used: 0, remaining: 10, period: 'month' } },
   });
 
+// One of each kind the live list contains, plus the ready-but-not-selectable
+// case (openthai2.0-legal@jts is the real one), so the grouping and the
+// filtering are both exercised against shapes the server actually sends.
 const DEFAULT_MODELS = [
-  { id: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash Lite', providerName: 'Google', isFreeCredit: true, ready: true },
-  { id: 'claude-sonnet-5@default', displayName: 'Claude Sonnet 5', providerName: 'Anthropic', ready: true },
-  { id: 'veo-3.1-fast-generate-001', displayName: 'Veo 3.1 Fast', providerName: 'Google', ready: true },
+  { id: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash Lite', provider: 'google', providerName: 'Google', isFreeCredit: true, ready: true },
+  { id: 'claude-sonnet-5@default', displayName: 'Claude Sonnet 5', provider: 'anthropic', providerName: 'Anthropic', ready: true },
+  { id: 'veo-3.1-fast-generate-001', displayName: 'Veo 3.1 Fast', provider: 'google', providerName: 'Google', ready: true },
+  { id: 'gpt-image-2', displayName: 'GPT-Image-2', provider: 'openai', providerName: 'OpenAI', ready: true },
+  { id: 'gemini-3-pro-image', displayName: 'Nano Banana Pro', provider: 'google', providerName: 'Google', ready: true },
+  { id: 'lyria-3-pro-preview', displayName: 'Lyria 3 Pro', provider: 'google', providerName: 'Google', ready: true },
+  { id: 'sonar-deep-research', displayName: 'Sonar Deep Research', provider: 'perplexity', providerName: 'Perplexity', ready: true },
+  { id: 'sonar-reasoning-pro', displayName: 'Sonar Reasoning Pro', provider: 'perplexity', providerName: 'Perplexity', ready: true },
+  { id: 'openthai2.0-legal@jts', displayName: 'OpenThai 2.0 Legal', provider: 'openthai', providerName: 'AIEAT', ready: true, selectable: false },
 ];
 const DEFAULT_CONVERSATIONS = [
   { id: 'aaaa1111aaaa1111', title: 'newest', updatedAt: '2026-09-01T10:00:00.000Z' },

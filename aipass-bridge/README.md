@@ -392,6 +392,48 @@ conversation that stops accepting messages (`404` when deleted, `409` when the
 server still believes a generation is running) makes the bridge move to the next
 most recent.
 
+## Models
+
+The account carries far more than chat models — the live list is 34, of which 11
+generate images, video or music. The bridge used to hide those, so a third of
+what the account can do was invisible from here.
+
+```bash
+npm run models              # everything, grouped
+npm run models -- image     # one category
+```
+
+```
+สนทนา · chat  (22)
+  gemini-3.1-flash-lite                      Gemini 3.1 Flash Lite  [free]
+  claude-opus-5@azure                        Claude Opus 5
+  ...
+
+สร้างรูปภาพ · image  (5)
+  gpt-image-2                                GPT-Image-2
+  gemini-3-pro-image                         Nano Banana Pro
+  ...
+```
+
+The popup groups its dropdown the same way, and `/v1/models` takes
+`?kind=image` (or `?kind=image,video`) and tags every entry with its `kind`.
+
+**The category is derived here, not sent.** `list-models` carries `id`,
+`displayName`, `provider`, `description`, icons, `ready`, `selectable`,
+`isFreeCredit` and `thinkingConfig` — and no category at all, so the tabs in the
+web UI are built client-side. The rules that reproduce them live at the top of
+`bridge/server.mjs`, each annotated with the models it actually catches, so they
+can be re-checked against a fresh capture rather than trusted.
+
+Two other fields now matter: a model that is `ready` but `selectable: false`
+(`openthai2.0-legal@jts` is the live example) is not offered, because the web UI
+does not offer it either.
+
+> **Listing them is not yet driving them.** A chat request to an image model
+> goes upstream, but the reply comes back as frames this bridge does not decode
+> yet, so you get an empty answer rather than a picture. `AIPASS_MODEL_FILTER=chat`
+> restores the old text-only list if that bothers a client.
+
 ## When it is not working
 
 Every failure in this chain looks the same from a client — the request just does
@@ -465,7 +507,7 @@ decimals is a pool of 10,000 — the bridge does that division for you.
 | `AIPASS_PORT` | `8787` | |
 | `AIPASS_MODEL` | `gemini-3.1-flash-lite` | used when no model is given |
 | `AIPASS_MODELS` | two known ids | fallback list when no extension is attached |
-| `AIPASS_MODEL_FILTER` | `chat` | `all` keeps image/video/audio models |
+| `AIPASS_MODEL_FILTER` | `all` | `chat` drops the image/video/music generators |
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `text` or `off` |
 | `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
