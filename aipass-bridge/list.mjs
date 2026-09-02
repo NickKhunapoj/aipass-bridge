@@ -3,16 +3,21 @@
 // liners in package.json, which is a code-execution shape that upstream
 // filters reject when the agent reads its own package.json back.
 const BRIDGE = (process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
-const what = process.argv[2] ?? 'models';
+const argv = process.argv.slice(2);
+const what = argv[0] ?? 'models';
 
-if (['--help', '-h', 'help'].includes(what)) {
-  console.log(`usage: node aipass-bridge/list.mjs <models|conversations|credits>
+// `npm run models -- --help` lands the flag after the subcommand, so look
+// anywhere rather than only at the first word.
+if (argv.some((a) => ['--help', '-h', 'help'].includes(a))) {
+  console.log(`usage: npm run models | npm run conversations | npm run credits
 
   models         list models, marking the free-credit ones
   conversations  list conversations, marking the one in use
   credits        how much of the credit pool is left
 
-  AIPASS_BRIDGE  bridge base URL (default: http://127.0.0.1:8787)`);
+  AIPASS_BRIDGE  bridge base URL (default: http://127.0.0.1:8787)
+
+Each is a thin wrapper over: node aipass-bridge/list.mjs <what>`);
   process.exit(0);
 }
 
