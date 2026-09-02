@@ -434,6 +434,50 @@ does not offer it either.
 > yet, so you get an empty answer rather than a picture. `AIPASS_MODEL_FILTER=chat`
 > restores the old text-only list if that bothers a client.
 
+## Generating an image
+
+Pick an image model and ask for a picture. The reply comes back as a markdown
+image, because chat completions have no field for one and every client already
+renders markdown:
+
+```bash
+npm run chat -- "อยากได้ภาพแมว" --model gpt-image-2 --ratio 3:4
+```
+
+```
+[image saved to /Users/you/aipass-1788366061-1.png]
+```
+
+`npm run chat` writes the file rather than printing megabytes of base64 into
+your scrollback; `--out DIR` chooses where. From an OpenAI client the image
+arrives inline as `![image](data:image/png;base64,…)`.
+
+The aspect ratio rides on the same `imageAspectRatio` field the web UI sends.
+A request can set `aspect_ratio`, `POST /config {"aspectRatio":"4:3"}` sets the
+default, and `AIPASS_ASPECT_RATIO` sets it at startup.
+
+> **How solid this is.** The request shape is confirmed against a capture of the
+> web UI generating an image — it is byte-for-byte what the bridge already sent,
+> aspect ratio included. The *response* is not: no capture of a finished
+> generation exists yet, so the decoder handles the `file` frame that this
+> stream protocol uses for generated images, which is the shape it should be
+> rather than the shape it is known to be.
+>
+> That is why nothing is dropped silently any more. Any frame the decoder does
+> not recognise is reported instead of ignored:
+>
+> ```
+> [frame] unhandled "data-image" — {"type":"data-image","data":{…}}
+> ```
+>
+> So the first real generation either produces the picture or names exactly what
+> came back instead. If you see that line, paste it and the fix is one case.
+
+The **สไตล์ (style)** presets in the UI — อนิเมะ, การ์ตูน / 2D แฟลต, 3D เรนเดอร์,
+เสมือนจริง, มินิมอล, AI / ไซเบอร์, สารคดี, น่ารัก / มาสคอต — are **not wired**.
+No capture shows which field carries them, and guessing a field name would fail
+silently. Send one capture with a style selected and they go in.
+
 ## When it is not working
 
 Every failure in this chain looks the same from a client — the request just does
@@ -508,6 +552,7 @@ decimals is a pool of 10,000 — the bridge does that division for you.
 | `AIPASS_MODEL` | `gemini-3.1-flash-lite` | used when no model is given |
 | `AIPASS_MODELS` | two known ids | fallback list when no extension is attached |
 | `AIPASS_MODEL_FILTER` | `all` | `chat` drops the image/video/music generators |
+| `AIPASS_ASPECT_RATIO` | `1:1` | image models only; the UI offers `1:1`, `3:4`, `4:3` |
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `text` or `off` |
 | `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |

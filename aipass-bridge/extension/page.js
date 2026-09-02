@@ -10,6 +10,14 @@
 
   const TAG = '__aipass_bridge';
   const inflight = new Map();
+  // Above this, an image goes back as a link rather than as bytes: the bridge
+  // caps a POST body at 8 MB and base64 costs a third on top.
+  const MAX_INLINE_IMAGE = 5 * 1024 * 1024;
+  // Frames that legitimately carry nothing we need.
+  const QUIET_FRAMES = new Set([
+    'start', 'start-step', 'finish-step', 'text-start', 'text-end',
+    'reasoning-start', 'reasoning-end', 'tool-input-delta', 'message-metadata',
+  ]);
 
   const reply = (msg) => window.postMessage({ [TAG]: 'res', ...msg }, window.location.origin);
 
@@ -196,7 +204,9 @@
 
       const body = JSON.stringify({
         modelId: job.modelId,
-        imageAspectRatio: '1:1',
+        // The image models take this; the chat models ignore it. The web UI
+        // offers 1:1, 3:4 and 4:3.
+        imageAspectRatio: job.aspectRatio || '1:1',
         messages: [{
           id: crypto.randomUUID(),
           role: 'user',
@@ -234,6 +244,7 @@
       let finishReason = 'stop';
       const toolNames = new Map();
       const sources = [];
+      const seenUnknown = new Set();
 
       for (;;) {
         const { value, done } = await reader.read();
@@ -279,6 +290,38 @@
               push('status', `[${name}] returned ${size} chars`);
               break;
             }
+            // A generated image arrives as a file part. Its URL is usually
+            // same-origin and needs the session cookie, which only this page
+            // has — so fetch it here and hand back a data URI. Anything already
+            // absolute, or too big to carry, goes back as a plain URL.
+            case 'file': {
+              const url = evt.url ?? evt.data?.url ?? '';
+              if (!url) break;
+              const mediaType = evt.mediaType ?? evt.data?.mediaType ?? '';
+              if (/^data:/i.test(url)) { push('image', url); break; }
+              let carried = '';
+              if (!/^https?:\/\//i.test(url) || url.startsWith(location.origin)) {
+                try {
+                  const r = await fetch(url, { credentials: 'include', signal: controller.signal });
+                  const blob = await r.blob();
+                  if (blob.size <= MAX_INLINE_IMAGE) {
+                    carried = await new Promise((resolve, reject) => {
+                      const fr = new FileReader();
+                      fr.onload = () => resolve(String(fr.result));
+                      fr.onerror = () => reject(fr.error);
+                      fr.readAsDataURL(blob);
+                    });
+                  } else {
+                    push('status', `[image] ${(blob.size / 1048576).toFixed(1)} MB — too large to inline, sending the link`);
+                  }
+                } catch (err) {
+                  push('status', `[image] could not read it here (${err?.message ?? err}), sending the link`);
+                }
+              }
+              push('image', carried || new URL(url, location.origin).href);
+              if (mediaType) push('status', `[image] ${mediaType}`);
+              break;
+            }
             case 'source-url':
               if (evt.url && !sources.some((x) => x.url === evt.url)) sources.push({ url: evt.url, title: evt.title });
               break;
@@ -288,7 +331,14 @@
               finishReason = evt.finishReason ?? finishReason;
               break;
             default:
-              break; // start-step, text-start/end, tool-input-delta, data-*, finish-step
+              // Known-boring frames carry no content. Anything else is either a
+              // protocol change or a shape we have never seen — say so once,
+              // rather than returning an empty answer and no clue why.
+              if (!QUIET_FRAMES.has(evt.type) && !seenUnknown.has(evt.type)) {
+                seenUnknown.add(evt.type);
+                push('status', `[frame] unhandled "${evt.type}" — ${JSON.stringify(evt).slice(0, 300)}`);
+              }
+              break;
           }
         }
       }
