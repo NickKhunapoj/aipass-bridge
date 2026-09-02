@@ -11,6 +11,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SERVER = path.join(HERE, '..', 'bridge', 'server.mjs');
 export const AGENT = path.join(HERE, '..', 'agent.mjs');
 export const CHAT = path.join(HERE, '..', 'chat.mjs');
+export const DOCTOR = path.join(HERE, '..', 'doctor.mjs');
 
 export function freePort() {
   return new Promise((resolve, reject) => {
