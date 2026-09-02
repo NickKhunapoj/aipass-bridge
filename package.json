@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "node aipass-bridge/bridge/server.mjs",
-    "test": "node --test aipass-bridge/test/*.test.mjs",
+    "test": "node scripts/test.mjs",
     "chat": "node aipass-bridge/chat.mjs",
     "agent": "node aipass-bridge/agent.mjs",
     "models": "node aipass-bridge/list.mjs models",
