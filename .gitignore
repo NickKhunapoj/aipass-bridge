@@ -51,3 +51,8 @@ apipass*.md
 aipass*.md
 *.har
 
+# images npm run chat saves into the cwd by default
+/aipass-*.png
+/aipass-*.jpg
+/aipass-*.webp
+

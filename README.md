@@ -25,7 +25,8 @@ your terminal ──▶ OpenAI-compatible API on localhost:8787 ──▶ a real
 - **Chat from the terminal**, streaming, with web search and sources.
 - **Every model the account has** — 34 of them, including the image, video and
   music generators, grouped the way the web UI groups them.
-- **Generate images** — pick an image model, get a PNG.
+- **Generate images** — pick an image model, get a PNG
+  ([example](aipass-bridge/README.md#a-worked-example)).
 - **Edit local files** — an agent that reads, searches, and edits a project you point it at.
 - **See what it costs** — the credit pool, in the popup and after every agent run.
 - **Drop-in OpenAI endpoint** — point the `openai` SDK, or any tool that takes a base URL, at it.
