@@ -45,8 +45,11 @@ function keepAlive() {
   catch { setTimeout(keepAlive, 1000); return; }
 
   const beat = setInterval(() => {
-    try { port.postMessage({ t: Date.now() }); } catch { /* disconnect handles it */ }
-  }, 20_000);
+    try {
+      port.postMessage({ t: Date.now() });
+      chrome.runtime.sendMessage({ type: 'content-ping' }).catch(() => {});
+    } catch { /* disconnect handles it */ }
+  }, 10_000);
   const cycle = setTimeout(() => port.disconnect(), 4 * 60 * 1000);
 
   port.onDisconnect.addListener(() => {
