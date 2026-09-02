@@ -70,3 +70,7 @@ your bridge on localhost.
 
 Built on Node with no runtime dependencies, plus an MV3 Chrome extension.
 `npm run dev:next` still starts the Next.js app that this repo was scaffolded from.
+
+## License
+
+[MIT](LICENSE). Contributions are welcome and are taken under the same terms.

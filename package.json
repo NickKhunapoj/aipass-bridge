@@ -2,6 +2,7 @@
   "name": "aipass",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "dev": "node aipass-bridge/bridge/server.mjs",
     "test": "node scripts/test.mjs",

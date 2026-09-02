@@ -52,7 +52,7 @@ if (!task) {
 
   --root DIR      project root the agent may touch   (default: cwd)
   --model ID      model id                           (default: bridge default)
-  --apply         write changes to disk              (default: dry run)
+  --apply         write without asking               (default: ask after the diff)
   --allow-run     let the agent run shell commands   (default: off)
   --max N         max steps                          (default: 10)
   --max-result N  truncate each tool result          (default: 3000 bytes)`);
@@ -453,6 +453,42 @@ async function sayResilient(text, depth = 0) {
 
 /* ---------------------------------------------------------------- the loop */
 
+/* ----------------------------------------------------------- terminal input */
+
+// One readline interface for the whole run. The apply prompt and the watch loop
+// both read stdin, and two interfaces on the same stream each swallow half the
+// lines — so they share this one.
+let rl = null;
+let rlEnded = false;
+let awaiting = null;
+
+async function prompt(text) {
+  if (rlEnded) return null;
+  if (!rl) {
+    const { createInterface } = await import('node:readline');
+    rl = createInterface({ input: process.stdin, output: process.stdout });
+    // EOF — a pipe running dry, or Ctrl+D — resolves whatever question is open
+    // with null, so a caller can tell "no answer" from an empty line.
+    rl.on('close', () => { rlEnded = true; const settle = awaiting; awaiting = null; settle?.(null); });
+  }
+  return new Promise((resolve) => {
+    awaiting = resolve;
+    rl.question(text, (answer) => { awaiting = null; resolve(answer); });
+  });
+}
+
+// In watch mode stdin is the task channel, so only a real terminal can answer a
+// prompt without eating the next task. Everywhere else nothing competes for it.
+const canPrompt = () => Boolean(process.stdin.isTTY) || !WATCH;
+
+function writeOverlay() {
+  for (const [abs, text] of overlay) {
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, text);
+  }
+  console.log(green(`\nwrote ${overlay.size} file(s) to disk`));
+}
+
 function showDiff() {
   if (!overlay.size) { console.log(dim('\nno file changes')); return; }
   console.log(bold(`\n${overlay.size} file(s) changed:\n`));
@@ -548,32 +584,30 @@ async function runTask(taskText, { first }) {
   }
 
   showDiff();
-  if (APPLY && overlay.size) {
-    for (const [abs, text] of overlay) {
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, text);
-    }
-    console.log(green(`\nwrote ${overlay.size} file(s) to disk`));
-  } else if (overlay.size) {
-    console.log(dim('\ndry run — nothing written. re-run with --apply'));
-  }
+  if (!overlay.size) return;
+  if (APPLY) return void writeOverlay();
+
+  // The dry run already holds the exact edits the model made. Offering them here
+  // saves a second full run, which costs credits again and drives the model from
+  // scratch — so it need not even produce the same diff. What you see is what
+  // lands.
+  const answer = canPrompt() ? await prompt(bold(`\napply ${overlay.size} change(s)? [y/N] `)) : null;
+  if (answer === null) console.log(dim('\ndry run — nothing written. re-run with --apply'));
+  else if (/^y(es)?$/i.test(answer.trim())) writeOverlay();
+  else console.log(dim('nothing written.'));
 }
 
 await runTask(task, { first: true });
 
 if (WATCH) {
-  const { createInterface } = await import('node:readline');
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
   console.log(dim('\n— watching. type another task, or press Ctrl+C to stop —'));
-  rl.setPrompt(bold('\ntask> '));
-  rl.prompt();
-  // The async iterator ends cleanly on EOF (piped input) or Ctrl+D.
-  for await (const raw of rl) {
+  for (;;) {
+    const raw = await prompt(bold('\ntask> '));
+    if (raw === null) break; // EOF (piped input ran out) or Ctrl+D
     const line = raw.trim();
     if (line === 'exit' || line === 'quit') break;
     if (line) await runTask(line, { first: false });
-    rl.prompt();
   }
-  rl.close();
+  rl?.close();
   console.log(dim('\ndone.'));
 }
