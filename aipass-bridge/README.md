@@ -463,22 +463,48 @@ The aspect ratio rides on the same `imageAspectRatio` field the web UI sends.
 A request can set `aspect_ratio`, `POST /config {"aspectRatio":"4:3"}` sets the
 default, and `AIPASS_ASPECT_RATIO` sets it at startup.
 
-> **How solid this is.** The request shape is confirmed against a capture of the
-> web UI generating an image — it is byte-for-byte what the bridge already sent,
-> aspect ratio included. The *response* is not: no capture of a finished
-> generation exists yet, so the decoder handles the `file` frame that this
-> stream protocol uses for generated images, which is the shape it should be
-> rather than the shape it is known to be.
->
-> That is why nothing is dropped silently any more. Any frame the decoder does
-> not recognise is reported instead of ignored:
->
-> ```
-> [frame] unhandled "data-image" — {"type":"data-image","data":{…}}
-> ```
->
-> So the first real generation either produces the picture or names exactly what
-> came back instead. If you see that line, paste it and the fix is one case.
+### A worked example
+
+This came out of one command. The prompt is a heading and a ten-row CSV of a
+northern Thai menu, pasted straight into the REPL:
+
+```bash
+npm run chat -- --new --model gpt-image-2 --ratio 3:4
+```
+
+```
+> สร้างใบเมนูอาหารธีมล้านนา เอิร์ทโทน มีความภาคเหนือ โดยอิงรายละเอียดตามนี้ทั้งหมด
+"ร้านมาเหนือ
+ลำดับ,รายการเมนู,ราคา (บาท)
+1,ข้าวซอยไก่ ,65
+2,ข้าวซอยเนื้อโคขุน,85
+3,ขนมจีนน้ำเงี้ยวเชียงราย,55
+4,แกงฮังเลหมูนุ่ม,95
+5,ลาบหมูคั่วเครื่องเทศ,80
+6,น้ำพริกหนุ่ม + ผักลวก,60
+7,น้ำพริกอ่อง + ผักสด,60
+8,ไส้อั่วสมุนไพร (จานเล็ก),75
+9,จิ๊นนึ่งน้ำพริกข่า,120
+10,แกงโฮะวุ้นเส้น,70
+  (13 lines · sent as one message)
+[image saved to /Users/you/aipass-1788367390207-2.png]
+```
+
+<img src="docs/lanna-menu.png" alt="A Lanna-themed restaurant menu with ten Thai dishes and prices" width="420">
+
+768 × 1024 — the `3:4` reached the model — with all ten rows, names and prices
+intact. Both halves of that matter: `(13 lines · sent as one message)` is the
+paste arriving whole rather than as thirteen separate requests, and the saved
+file is the `file` frame decoding correctly.
+
+**Video and music are not proven.** `veo-*`, `seedance-*` and `lyria-*` are
+listed and selectable, and they use the same endpoint, but nobody has run one
+through here — if a frame comes back that the decoder does not know, it says so
+rather than returning nothing:
+
+```
+[frame] unhandled "data-video" — {"type":"data-video","data":{…}}
+```
 
 The **สไตล์ (style)** presets in the UI — อนิเมะ, การ์ตูน / 2D แฟลต, 3D เรนเดอร์,
 เสมือนจริง, มินิมอล, AI / ไซเบอร์, สารคดี, น่ารัก / มาสคอต — are **not wired**.
