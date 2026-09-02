@@ -110,6 +110,7 @@ Ctrl+C quits.
 | `npm run agent -- "task" --root . --watch` | stay open for follow-up tasks on the same conversation |
 | `npm run models` | list models, marking free-credit ones |
 | `npm run conversations` | list conversations and which is in use |
+| `npm run credits` | how much of the credit pool is left |
 | `npm test` | run the test suite |
 
 `npm run dev:next` still starts the Next.js app in this repo.
@@ -387,6 +388,35 @@ conversation that stops accepting messages (`404` when deleted, `409` when the
 server still believes a generation is running) makes the bridge move to the next
 most recent.
 
+## Credits
+
+Every model but `gemini-3.1-flash-lite` draws on a shared pool, and that figure
+used to live only in the web UI — so a run cost an unknown amount of something
+you could not see.
+
+```bash
+npm run credits
+```
+
+```
+9,833 of 10,000 credits left  (98%)
+used 167  ·  resets 2026-08-31
+video 10 of 10 left this month
+```
+
+The extension popup shows the same thing as a meter, amber under 20% and red
+under 5%. `npm run agent` prints the balance before it starts and what the run
+cost when it finishes:
+
+```
+credits  41.6 this run · 9,791 of 10,000 left
+```
+
+The bridge serves it at `GET /quota` (`?refresh=1` to bypass the 30-second
+cache) and includes the last known figures on `/status`. The upstream loader
+reports integers scaled by `creditsDecimals`, so a raw `10000000000` at 6
+decimals is a pool of 10,000 — the bridge does that division for you.
+
 ## Configuration
 
 | env | default | |
@@ -453,4 +483,4 @@ filter is being modelled, pass `reject` to refuse payloads matching a pattern.
   re-injects the scripts.
 - Every message appears in the account's chat history — this uses the real product.
 - Long sessions burn credits. Only `gemini-3.1-flash-lite` is free-credit;
-  `npm run models` marks it.
+  `npm run models` marks it, and `npm run credits` says what is left.

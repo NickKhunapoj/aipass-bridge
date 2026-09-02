@@ -148,6 +148,32 @@ test('a job survives the extension disconnecting mid-stream', async () => {
   await back.disconnect();
 });
 
+test('reports credits, scaled out of the raw integers', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  const quota = await fetch(`${bridge.base}/quota?refresh=1`).then((r) => r.json());
+  // 10000000000 at creditsDecimals 6 is a pool of 10,000 — not ten billion.
+  assert.equal(quota.limit, 10000);
+  assert.equal(quota.available, 9832.957142);
+  assert.equal(quota.used, 167.042858);
+  assert.equal(quota.periodEndsAt, '2026-08-31T19:00:00.000Z');
+  assert.deepEqual(quota.video, { limit: 10, used: 0, remaining: 10, period: 'month' });
+
+  // and the same figures ride along on /status, so the popup polls one endpoint
+  const status = await fetch(`${bridge.base}/status`).then((r) => r.json());
+  assert.equal(status.credits.available, 9832.957142);
+});
+
+test('credits are unavailable rather than wrong when no tab is attached', async (t) => {
+  const solo = await startBridge();
+  t.after(() => solo.stop());
+  const res = await fetch(`${solo.base}/quota`);
+  assert.equal(res.status, 503);
+  const status = await fetch(`${solo.base}/status`).then((r) => r.json());
+  assert.equal(status.credits, null);
+});
+
 test('config sets the default model and reports it', async () => {
   const handler = scripted(['ok']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();

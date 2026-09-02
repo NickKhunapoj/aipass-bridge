@@ -10,6 +10,7 @@
     "agent": "node aipass-bridge/agent.mjs",
     "models": "node aipass-bridge/list.mjs models",
     "conversations": "node aipass-bridge/list.mjs conversations",
+    "credits": "node aipass-bridge/list.mjs credits",
     "dev:next": "next dev",
     "build": "next build",
     "start": "next start",

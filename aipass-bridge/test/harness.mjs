@@ -98,6 +98,21 @@ export const createFixture = (requestId, initialMessage) => encodeTurboStream({
   },
 });
 
+// get-usage-quota answers with plain JSON, not turbo-stream. Figures are
+// integers scaled by creditsDecimals, exactly as the real loader sends them.
+export const quotaFixture = ({ limit = '10000000000', used = '167042858', available = '9832957142', decimals = 6 } = {}) =>
+  JSON.stringify({
+    success: true,
+    creditStatusFetchedAt: 1788168532745,
+    creditStatus: {
+      userId: '216052379627656642221',
+      periodEndsAt: '2026-08-31T19:00:00.000Z',
+      creditsDecimals: decimals,
+      credits: { limit, used, available },
+    },
+    videoQuotaStatus: { count: { limit: 10, used: 0, remaining: 10, period: 'month' } },
+  });
+
 const DEFAULT_MODELS = [
   { id: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash Lite', providerName: 'Google', isFreeCredit: true, ready: true },
   { id: 'claude-sonnet-5@default', displayName: 'Claude Sonnet 5', providerName: 'Anthropic', ready: true },
@@ -111,8 +126,9 @@ const DEFAULT_CONVERSATIONS = [
 // Stands in for the extension. `onChat` receives the job plus an emitter and
 // decides what the upstream would have streamed back.
 export class FakeExtension {
-  constructor(base, { onChat, models = DEFAULT_MODELS, conversations = DEFAULT_CONVERSATIONS } = {}) {
+  constructor(base, { onChat, models = DEFAULT_MODELS, conversations = DEFAULT_CONVERSATIONS, quota = quotaFixture() } = {}) {
     this.base = base;
+    this.quota = quota;
     this.onChat = onChat ?? (async (_job, e) => { await e.text('ok'); await e.done(); });
     this.models = models;
     this.conversations = conversations;
@@ -182,7 +198,9 @@ export class FakeExtension {
     }
     if (job.kind === 'loader') {
       this.loaders.push(job.url);
-      const raw = job.url.includes('list-conversations')
+      const raw = job.url.includes('get-usage-quota')
+        ? this.quota
+        : job.url.includes('list-conversations')
         ? conversationsFixture(this.conversations)
         : modelsFixture(this.models);
       return void this.post('/ext/loader', { jobId: job.jobId, raw });
