@@ -138,8 +138,6 @@ class Job {
     this.client = client;
     sendToClient(client, 'job', this.kind === 'loader'
       ? { jobId: this.id, kind: 'loader', url: this.url }
-      : this.kind === 'inspect'
-      ? { jobId: this.id, kind: 'inspect' }
       : this.kind === 'create'
       ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField }
       : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts });
@@ -161,11 +159,6 @@ const fetchLoader = (url, timeoutMs = 20_000) =>
     job.dispatch();
   });
 
-const fetchInspect = (timeoutMs = 30_000) =>
-  new Promise((resolve, reject) => {
-    const job = new Job({ kind: 'inspect', timeoutMs, onDelta: () => {}, onDone: resolve, onError: (m) => reject(new Error(m)) });
-    job.dispatch();
-  });
 
 /* ------------------------------------------------------------------ models */
 
@@ -611,16 +604,6 @@ const server = http.createServer(async (req, res) => {
         current: PINNED_CONVERSATION || conversationCache,
         conversations: conversationList.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt })),
       });
-    }
-
-    if (path === '/inspect') {
-      const raw = await fetchInspect();
-      return json(res, 200, JSON.parse(raw));
-    }
-    if (path === '/asset') {
-      const target = url.searchParams.get('url');
-      const raw = await fetchLoader(target);
-      return json(res, 200, { ok: true, raw });
     }
 
     if (path === '/config' && req.method === 'POST') {

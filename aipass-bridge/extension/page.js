@@ -17,29 +17,12 @@
   // so a compromised bridge cannot turn this into a general request forwarder.
   async function runLoader(job) {
     try {
-      if (!/^\/(loaders|assets)\/[A-Za-z0-9._~-]+(\.data)?(\?|$)/.test(job.url)) {
-        throw new Error(`refusing non-loader/asset path: ${job.url}`);
+      if (!/^\/loaders\/[A-Za-z0-9._~-]+(\.data)?(\?|$)/.test(job.url)) {
+        throw new Error(`refusing non-loader path: ${job.url}`);
       }
       const res = await fetch(job.url, { credentials: 'include', headers: { accept: '*/*' } });
       if (!res.ok) throw new Error(`aipass returned ${res.status} ${res.statusText}`);
       reply({ jobId: job.jobId, kind: 'loader', raw: await res.text() });
-    } catch (err) {
-      reply({ jobId: job.jobId, kind: 'loader', message: String(err?.message ?? err) });
-    }
-  }
-  async function runInspect(job) {
-    try {
-      const res = await fetch('/assets/use-video-style-selection-DgXWZrL8.js');
-      const text = await res.text();
-      const target = '/actions/upload-file/confirm';
-      const idx = text.indexOf(target);
-      const snippet = idx !== -1 ? text.slice(Math.max(0, idx - 500), Math.min(text.length, idx + 2000)) : `TARGET NOT FOUND in ${text.length} chars`;
-
-      reply({
-        jobId: job.jobId,
-        kind: 'loader',
-        raw: JSON.stringify({ snippet })
-      });
     } catch (err) {
       reply({ jobId: job.jobId, kind: 'loader', message: String(err?.message ?? err) });
     }
@@ -172,12 +155,12 @@
             const rawUrl = p.image || p.url || p.data || '';
             let mediaType = p.mediaType || 'image/jpeg';
             let blob = null;
+            // Only data: URIs are accepted here. The bridge resolves remote
+            // image URLs to data URIs server-side (behind an SSRF guard), so the
+            // extension is never asked to fetch an arbitrary URL with the user's
+            // cookies.
             if (rawUrl.startsWith('data:')) {
               blob = dataUrlToBlob(rawUrl);
-              mediaType = blob.type || mediaType;
-            } else if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
-              const f = await fetch(rawUrl, { signal: controller.signal });
-              blob = await f.blob();
               mediaType = blob.type || mediaType;
             }
             if (blob) {
@@ -240,7 +223,7 @@
           .map(([h, v]) => `${h}=${v}`)
           .join(' ');
         throw new Error(
-          `aipass returned ${res.status} ${res.statusText} [${body.length} bytes] [payload: ${body}]` +
+          `aipass returned ${res.status} ${res.statusText} [${body.length} bytes]` +
           `${forensics ? ` {${forensics}}` : ''}${detail ? ` — ${detail}` : ''}`
         );
       }
@@ -331,7 +314,7 @@
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg[TAG] === 'req') {
-      const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'inspect' ? runInspect : msg.job.kind === 'create' ? runCreate : run;
+      const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'create' ? runCreate : run;
       fn(msg.job);
     }
     else if (msg[TAG] === 'abort') inflight.get(msg.jobId)?.abort();
