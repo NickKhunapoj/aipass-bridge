@@ -23,6 +23,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --bridge URL        bridge base URL       (default: http://127.0.0.1:8787)
   --ratio R           image aspect ratio    (1:1, 3:4, 4:3 — image models only)
   --out DIR           where to save generated images   (default: the cwd)
+  --paste-idle MS     how long to wait before treating pasted lines as one
+                      message                          (default: 60)
 
 With a question, it answers and exits. Without one it stays interactive, where
 /models lists what is available, /model <id> switches, and Ctrl+C quits.`);
@@ -135,31 +137,67 @@ if (question) {
 }
 
 console.log(bold('aipass') + dim(`  model ${model}  ·  conversation ${status.conversation ?? 'resolves on first message'}`));
-console.log(dim('/model <id> to switch  ·  /models to list  ·  Ctrl+C to quit\n'));
+console.log(dim('/model <id> to switch  ·  /models to list  ·  paste sends as one  ·  Ctrl+C to quit\n'));
+
+// Readline reports one line per newline, so pasting a block used to send it as
+// one message per line — a thirteen-line menu became thirteen requests, each
+// billed, and the model saw only the first line as the question. A paste
+// arrives as a burst of line events within a few milliseconds; nobody types a
+// whole line that fast, so a short idle separates a paste from a keystroke.
+const PASTE_IDLE_MS = Number(flag('paste-idle', 60));
 
 const rl = readline.createInterface({ input: stdin, output: stdout });
-for (;;) {
-  let line;
-  try { line = (await rl.question(bold('> '))).trim(); }
-  catch { break; } // Ctrl+C / Ctrl+D
-  if (!line) continue;
+rl.setPrompt(bold('> '));
+rl.prompt();
 
-  if (line === '/models') {
+let buffered = [];
+let idleTimer = null;
+let chain = Promise.resolve();
+
+async function handleBlock(lines) {
+  const block = lines.join('\n').trim();
+  if (!block) return;
+
+  if (lines.length === 1 && block === '/models') {
     const { data } = await fetch(`${BRIDGE}/v1/models`).then((r) => r.json());
     for (const m of data) console.log(`  ${m.id.padEnd(38)} ${m.name}${m.free_credit ? dim('  [free]') : ''}`);
-    continue;
+    return;
   }
-  if (line.startsWith('/model ')) {
-    model = line.slice(7).trim();
+  if (lines.length === 1 && block.startsWith('/model ')) {
+    model = block.slice(7).trim();
     await fetch(`${BRIDGE}/config`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ defaultModel: model }),
     }).catch(() => {});
     console.log(dim(`  model ${model}`));
-    continue;
+    return;
   }
 
-  await ask(line);
+  // Say so, because one message out of many lines is the surprising direction.
+  if (lines.length > 1) console.log(dim(`  (${lines.length} lines · sent as one message)`));
+  await ask(block);
   console.log();
 }
-rl.close();
+
+let closed = false;
+
+function submit() {
+  const lines = buffered;
+  buffered = [];
+  chain = chain.then(() => handleBlock(lines)).then(() => { if (!closed) rl.prompt(); });
+}
+
+rl.on('line', (raw) => {
+  buffered.push(raw);
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(submit, PASTE_IDLE_MS);
+});
+
+rl.on('SIGINT', () => rl.close());
+await new Promise((resolve) => rl.on('close', resolve));
+closed = true;
+// EOF arrives before the idle timer when input is piped, and end-of-input is a
+// submit, not a discard — otherwise a piped block is silently dropped.
+clearTimeout(idleTimer);
+if (buffered.length) submit();
+await chain;
