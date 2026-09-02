@@ -12,6 +12,19 @@ const flag = (name, fallback = null) => {
   const i = argv.indexOf(`--${name}`);
   return i === -1 ? fallback : argv[i + 1];
 };
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(`usage: npm run chat [-- "question"] [options]
+
+  --model ID          model to use          (default: whatever the bridge is set to)
+  --conversation ID   continue a specific conversation
+  --new               start a fresh conversation instead of the most recent
+  --bridge URL        bridge base URL       (default: http://127.0.0.1:8787)
+
+With a question, it answers and exits. Without one it stays interactive, where
+/models lists what is available, /model <id> switches, and Ctrl+C quits.`);
+  process.exit(0);
+}
+
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 const CONVERSATION = flag('conversation', null);
 const NEW = argv.includes('--new');

@@ -5,6 +5,17 @@
 const BRIDGE = (process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const what = process.argv[2] ?? 'models';
 
+if (['--help', '-h', 'help'].includes(what)) {
+  console.log(`usage: node aipass-bridge/list.mjs <models|conversations|credits>
+
+  models         list models, marking the free-credit ones
+  conversations  list conversations, marking the one in use
+  credits        how much of the credit pool is left
+
+  AIPASS_BRIDGE  bridge base URL (default: http://127.0.0.1:8787)`);
+  process.exit(0);
+}
+
 const get = async (p) => {
   const res = await fetch(`${BRIDGE}${p}`);
   if (!res.ok) throw new Error(`bridge returned ${res.status}`);

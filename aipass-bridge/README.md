@@ -111,6 +111,7 @@ Ctrl+C quits.
 | `npm run models` | list models, marking free-credit ones |
 | `npm run conversations` | list conversations and which is in use |
 | `npm run credits` | how much of the credit pool is left |
+| `npm run doctor` | check every link in the chain and name what is broken |
 | `npm test` | run the test suite |
 
 `npm run dev:next` still starts the Next.js app in this repo.
@@ -387,6 +388,43 @@ Posting to an invented id returns `404 Conversation not found`, and a
 conversation that stops accepting messages (`404` when deleted, `409` when the
 server still believes a generation is running) makes the bridge move to the next
 most recent.
+
+## When it is not working
+
+Every failure in this chain looks the same from a client — the request just does
+not work — because the thing that broke is upstream of the thing you are running.
+
+```bash
+npm run doctor
+```
+
+```
+✓ bridge         responding
+✓ extension      1 attached
+✓ login          signed in — 23 models
+✓ credits        9,833 of 10,000 left (98%)
+✓ conversation   1137342f9c0a4e21
+✓ round trip     gemini-3.1-flash-lite replied in 1.2s
+
+all good.
+```
+
+Each check tests one link, and a failing one prints the single next action:
+
+```
+✓ bridge         responding
+✗ extension      no tab attached
+                 → open https://de.aipass.net/chat and leave it open; the popup should read "connected"
+– login          skipped — nothing attached to ask
+```
+
+Checks after a failure are skipped rather than reported as broken too, so the
+first `✗` is always the one to fix. It exits `0` when everything passes and `1`
+otherwise, which makes it usable as a readiness probe.
+
+The round trip actually sends a message. It runs unasked only when a
+free-credit model is available, so a clean bill of health costs nothing —
+`--chat` forces it on a paid model, `--no-chat` skips it.
 
 ## Credits
 
