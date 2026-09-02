@@ -451,6 +451,24 @@ async function sayResilient(text, depth = 0) {
   }
 }
 
+/* -------------------------------------------------------------------- credits */
+
+// Every model but gemini-3.1-flash-lite draws down a shared pool. Reading it
+// either side of a run turns "did that cost anything?" into a number.
+const quota = (fresh = false) =>
+  fetch(`${BRIDGE}/quota${fresh ? '?refresh=1' : ''}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+
+const credits = (n) => n.toLocaleString('en-US', { maximumFractionDigits: n < 100 ? 2 : 0 });
+
+async function reportCredits(before) {
+  const after = await quota(true);
+  if (!after) return;
+  const spent = before ? before.available - after.available : null;
+  console.log(dim(`\ncredits  ${spent > 0 ? `${credits(spent)} this run · ` : ''}${credits(after.available)} of ${credits(after.limit)} left`));
+}
+
 /* ---------------------------------------------------------------- the loop */
 
 /* ----------------------------------------------------------- terminal input */
@@ -526,6 +544,11 @@ const bridgeStatus = await fetch(`${BRIDGE}/status`).then((r) => r.json()).catch
 
 console.log(bold('root  ') + ROOT);
 console.log(bold('mode  ') + (APPLY ? green('APPLY — files will be written') : 'dry run (pass --apply to write)'));
+if (bridgeStatus?.credits) {
+  const c = bridgeStatus.credits;
+  console.log(bold('cred  ') + `${credits(c.available)} of ${credits(c.limit)} left` +
+    (c.periodEndsAt ? dim(`  · resets ${c.periodEndsAt.slice(0, 10)}`) : ''));
+}
 console.log(bold('chat  ') + (bridgeStatus?.conversation ?? 'resolves on first message') +
   dim(CONVERSATION ? '  (continuing)' : REUSE ? '  (reusing the most recent)' : '  (new)') +
   (ASSISTANT ? dim(`  · assistant ${ASSISTANT}`) : ''));
@@ -536,6 +559,7 @@ const useSlim = SLIM || Boolean(ASSISTANT);
 // The conversation persists across calls, so the model keeps its context.
 async function runTask(taskText, { first }) {
   overlay.clear();
+  const creditsBefore = await quota();
   let listing = '';
   try { listing = outbound(TOOLS.list('.')); } catch { /* ignore */ }
 
@@ -583,6 +607,7 @@ async function runTask(taskText, { first }) {
     if (step === MAX_STEPS) console.log(red('\nreached the step limit'));
   }
 
+  await reportCredits(creditsBefore);
   showDiff();
   if (!overlay.size) return;
   if (APPLY) return void writeOverlay();

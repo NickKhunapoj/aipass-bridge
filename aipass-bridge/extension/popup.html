@@ -153,6 +153,32 @@
   .stat .n { font-weight: 650; font-size: 15px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
   .stat .l { color: var(--faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; margin-top: 1px; }
 
+  /* ---------- credit meter ---------- */
+  .meter {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .meter-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: var(--ok);
+    transition: width .3s ease;
+  }
+  .meter-fill.low  { background: var(--warn); }
+  .meter-fill.gone { background: var(--bad); }
+  .credit-row {
+    display: flex; align-items: baseline; gap: 6px;
+    margin-top: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .credit-left { font-weight: 650; font-size: 14px; letter-spacing: -.02em; }
+  .credit-of { color: var(--faint); font-size: 11.5px; }
+  .credit-reset { margin-left: auto; color: var(--faint); font-size: 11px; }
+
   /* ---------- sections ---------- */
   section { margin: 12px 12px 0; }
   .lbl {
@@ -285,6 +311,16 @@
   <div class="stat"><div class="n" id="sModels">–</div><div class="l">Models</div></div>
   <div class="stat"><div class="n" id="sChat">–</div><div class="l">Chat</div></div>
 </div>
+
+<section id="creditsBox" hidden>
+  <div class="lbl">Credits <span class="n" id="creditsPct"></span></div>
+  <div class="meter"><div class="meter-fill" id="creditsFill"></div></div>
+  <div class="credit-row">
+    <span class="credit-left" id="creditsLeft">–</span>
+    <span class="credit-of" id="creditsOf"></span>
+    <span class="credit-reset" id="creditsReset"></span>
+  </div>
+</section>
 
 <section>
   <div class="lbl">Default model <span class="n" id="count"></span></div>

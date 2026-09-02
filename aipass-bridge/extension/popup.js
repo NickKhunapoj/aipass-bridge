@@ -128,6 +128,27 @@ function renderModels(models, selected) {
   setText($('count'), models.length ? `(${models.length})` : '');
 }
 
+// Only gemini-3.1-flash-lite is free; everything else draws this pool down, and
+// until now the number lived solely in the web UI.
+function renderCredits(credits) {
+  const box = $('creditsBox');
+  if (!credits || !credits.limit) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const n = (v) => v.toLocaleString('en-US', { maximumFractionDigits: v < 100 ? 1 : 0 });
+  const share = Math.max(0, Math.min(1, credits.available / credits.limit));
+  const pct = Math.round(share * 100);
+
+  const fill = $('creditsFill');
+  fill.style.width = `${Math.max(share * 100, share > 0 ? 2 : 0)}%`;
+  setClass(fill, 'meter-fill', pct <= 5 ? 'gone' : pct <= 20 ? 'low' : '');
+
+  setText($('creditsPct'), `(${pct}%)`);
+  setText($('creditsLeft'), n(credits.available));
+  setText($('creditsOf'), `of ${n(credits.limit)} left`);
+  setText($('creditsReset'), credits.periodEndsAt ? `resets ${credits.periodEndsAt.slice(5, 10)}` : '');
+}
+
 async function render() {
   const sw = await swStatus();
   if (sw?.bridgeUrl) bridge = sw.bridgeUrl;
@@ -159,6 +180,7 @@ async function render() {
   setText($('sChat'), srv ? shortId(srv.conversation) : '–');
 
   if (srv) renderModels(srv.models ?? [], srv.defaultModel);
+  renderCredits(srv?.credits);
 
   // Don't clobber the field while it is being edited.
   if (document.activeElement !== $('url')) $('url').value = bridge;
@@ -197,8 +219,9 @@ $('save').addEventListener('click', async () => {
 $('refresh').addEventListener('click', async () => {
   try {
     await fetch(`${bridge}/v1/models?refresh=1`, { cache: 'no-store' });
+    await fetch(`${bridge}/quota?refresh=1`, { cache: 'no-store' }).catch(() => {});
     modelSignature = '';
-    toast('Models refreshed');
+    toast('Refreshed');
   } catch {
     toast('Could not reach the bridge');
   }

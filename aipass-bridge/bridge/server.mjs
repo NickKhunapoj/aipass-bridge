@@ -89,6 +89,9 @@ function decodeTurboStream(text) {
 const LOADERS = {
   models: '/loaders/list-models.data?_routes=routes%2Floaders%2Flist-models',
   conversations: '/loaders/list-conversations.data?_routes=routes%2Floaders%2Flist-converstaions',
+  // Unlike the other two this one answers with plain JSON and takes no _routes
+  // parameter, so it is parsed rather than turbo-stream decoded.
+  quota: '/loaders/get-usage-quota',
 };
 
 // list-models carries no field separating chat models from image/video/audio
@@ -217,6 +220,54 @@ async function listModels({ force = false } = {}) {
     return cachedModels();
   })();
   return modelRefresh;
+}
+
+/* --------------------------------------------------------------- credits */
+
+// Everything but gemini-3.1-flash-lite draws on a credit pool, and until now the
+// only place that number appeared was the web UI. Raw figures are integers
+// scaled by creditsDecimals: 10000000000 at 6 decimals is a pool of 10,000.
+let quotaCache = { at: 0, value: null };
+let quotaRefresh = null;
+const QUOTA_TTL_MS = 30_000;
+
+function extractQuota(payload) {
+  const credits = payload?.creditStatus?.credits;
+  if (!credits) return null;
+  const scale = 10 ** Number(payload.creditStatus.creditsDecimals ?? 0);
+  const scaled = (v) => (v == null ? null : Number(v) / scale);
+  const video = payload?.videoQuotaStatus?.count ?? null;
+  return {
+    limit: scaled(credits.limit),
+    used: scaled(credits.used),
+    available: scaled(credits.available),
+    periodEndsAt: payload.creditStatus.periodEndsAt ?? null,
+    video: video ? { limit: video.limit, used: video.used, remaining: video.remaining, period: video.period } : null,
+    fetchedAt: payload.creditStatusFetchedAt ?? Date.now(),
+  };
+}
+
+// Returns the last known figures rather than throwing when nothing is attached,
+// so a caller can render "unknown" instead of an error.
+async function getQuota({ force = false } = {}) {
+  if (!force && quotaCache.value && Date.now() - quotaCache.at < QUOTA_TTL_MS) return quotaCache.value;
+  if (!extClients.size) return quotaCache.value;
+  if (quotaRefresh) return quotaRefresh; // several callers can race; only one should hit the API
+  quotaRefresh = (async () => {
+    try {
+      const value = extractQuota(JSON.parse(await fetchLoader(LOADERS.quota)));
+      if (value) {
+        quotaCache = { at: Date.now(), value };
+        log(`credits ${value.available.toFixed(0)} of ${value.limit.toFixed(0)} left`);
+      }
+    } catch (err) {
+      log('credit refresh failed:', err.message);
+    } finally {
+      quotaRefresh = null;
+    }
+    return quotaCache.value;
+  })();
+  return quotaRefresh;
 }
 
 /* ----------------------------------------------------------- conversations */
@@ -585,7 +636,12 @@ function extEvents(req, res) {
   extClients.add(client);
   log(`extension connected (${extClients.size} total)`);
   sendToClient(client, 'ready', { clientId: client.id });
-  setTimeout(() => listModels({ force: true }).catch(() => {}), 500);
+  // Warm the caches a moment after the tab attaches — but only if this client
+  // is still the reason to: a tab that closed in the meantime would otherwise
+  // send a loader job to whoever connected next.
+  const warm = (fn, ms) => setTimeout(() => { if (extClients.has(client)) fn().catch(() => {}); }, ms);
+  warm(() => listModels({ force: true }), 500);
+  warm(() => getQuota({ force: true }), 900);
 
   const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
   req.on('close', () => {
@@ -639,6 +695,12 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (path === '/v1/chat/completions' && req.method === 'POST') return await chatCompletions(req, res);
+
+    if (path === '/quota' || path === '/credits') {
+      const quota = await getQuota({ force: url.searchParams.get('refresh') === '1' });
+      if (!quota) return oaiError(res, 503, 'no credit figures yet — open a de.aipass.net tab', 'unavailable');
+      return json(res, 200, quota);
+    }
 
     if (path === '/v1/models') {
       const models = await listModels({ force: url.searchParams.get('refresh') === '1' });
@@ -739,6 +801,7 @@ const server = http.createServer(async (req, res) => {
         conversation: PINNED_CONVERSATION || conversationCache,
         assistant: assistantId || null,
         models: cachedModels(),
+        credits: quotaCache.value,
       });
     }
 
