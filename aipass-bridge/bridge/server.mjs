@@ -96,8 +96,29 @@ const LOADERS = {
 
 // list-models carries no field separating chat models from image/video/audio
 // generators, so exclude those by id. AIPASS_MODEL_FILTER=all keeps them.
-const MEDIA_ID = /(seedream|seedance|veo-|lyria|gpt-image|-image$|image-preview)/i;
-const MODEL_FILTER = process.env.AIPASS_MODEL_FILTER ?? 'chat';
+// The loader carries no category field — the tabs in the web UI (สนทนา,
+// สร้างรูปภาพ, สร้างวิดีโอ, สร้างเพลง, ค้นคว้าเชิงลึก) are built client-side, so
+// the grouping has to be derived here. Each rule below is annotated with the
+// models it actually catches in the live list, so it can be checked against a
+// fresh capture rather than trusted.
+const KINDS = [
+  // seedream-4.0, seedream-5.0-lite, gpt-image-2, gemini-3-pro-image, gemini-2.5-flash-image
+  ['image', /seedream|gpt-image|-image$|image-preview/i],
+  // veo-3.1-fast-generate-001, seedance-2.0{,-fast,-mini}
+  ['video', /^veo-|seedance/i],
+  // lyria-3-pro-preview, lyria-3-clip-preview
+  ['music', /lyria/i],
+  // openai-deep-research, sonar-deep-research. Plain sonar and
+  // sonar-reasoning-pro stay under chat: they answer conversationally and only
+  // search the web on the way, which is not what the deep-research tab holds.
+  ['research', /deep-research/i],
+];
+
+const kindOf = (id) => KINDS.find(([, re]) => re.test(id))?.[0] ?? 'chat';
+
+// 'all' is the default: an image model you cannot see is one you cannot select.
+// Set AIPASS_MODEL_FILTER=chat to get only the models a text client can drive.
+const MODEL_FILTER = process.env.AIPASS_MODEL_FILTER ?? 'all';
 
 function extractModels(decoded) {
   const out = [];
@@ -106,20 +127,29 @@ function extractModels(decoded) {
     if (!v || typeof v !== 'object') return;
     const id = v.id ?? v.modelId;
     if (typeof id === 'string' && id && !out.some((m) => m.id === id)) {
+      const kind = kindOf(id);
       out.push({
         id,
         name: v.displayName ?? v.name ?? id,
         provider: v.providerName ?? v.provider ?? null,
+        providerId: v.provider ?? null,
+        description: v.description ?? null,
+        kind,
         free: v.isFreeCredit === true,
         ready: v.ready !== false,
+        // One model in the live list is ready but not selectable
+        // (openthai2.0-legal@jts); the web UI does not offer it.
+        selectable: v.selectable !== false,
+        isDefault: v.isDefault === true,
         thinking: Array.isArray(v.thinkingConfig?.supportedLevels) ? v.thinkingConfig.supportedLevels : null,
-        media: MEDIA_ID.test(id),
+        media: kind !== 'chat' && kind !== 'research',
       });
     }
     Object.values(v).forEach(walk);
   };
   walk(decoded);
-  return MODEL_FILTER === 'all' ? out : out.filter((m) => !m.media && m.ready);
+  const usable = out.filter((m) => m.ready && m.selectable);
+  return MODEL_FILTER === 'chat' ? usable.filter((m) => !m.media) : usable;
 }
 
 /* ---------------------------------------------------------------- job hub */
@@ -198,7 +228,7 @@ const MODEL_TTL_MS = 60_000;
 const cachedModels = () =>
   modelCache.models.length
     ? modelCache.models
-    : MODELS_FALLBACK.map((id) => ({ id, name: id, provider: null, free: false, ready: true, thinking: null }));
+    : MODELS_FALLBACK.map((id) => ({ id, name: id, provider: null, free: false, ready: true, selectable: true, kind: kindOf(id), thinking: null }));
 
 async function listModels({ force = false } = {}) {
   if (!force && modelCache.models.length && Date.now() - modelCache.at < MODEL_TTL_MS) return modelCache.models;
@@ -210,7 +240,9 @@ async function listModels({ force = false } = {}) {
       if (models.length) {
         modelCache = { at: Date.now(), models };
         const free = models.filter((m) => m.free).map((m) => m.id);
-        log(`${models.length} models${free.length ? ` (free credit: ${free.join(', ')})` : ''}`);
+        const byKind = [...new Set(models.map((m) => m.kind))]
+          .map((k) => `${models.filter((m) => m.kind === k).length} ${k}`).join(', ');
+        log(`${models.length} models (${byKind})${free.length ? ` · free credit: ${free.join(', ')}` : ''}`);
       }
     } catch (err) {
       log('model refresh failed:', err.message);
@@ -703,12 +735,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (path === '/v1/models') {
-      const models = await listModels({ force: url.searchParams.get('refresh') === '1' });
+      const all = await listModels({ force: url.searchParams.get('refresh') === '1' });
+      // ?kind=image (or a comma-separated set) narrows the list the way the web
+      // UI's tabs do.
+      const want = (url.searchParams.get('kind') ?? '').split(',').map((k) => k.trim()).filter(Boolean);
+      const models = want.length ? all.filter((m) => want.includes(m.kind)) : all;
       return json(res, 200, {
         object: 'list',
         data: models.map((m) => ({
           id: m.id, object: 'model', created: 0, owned_by: m.provider ?? 'aipass',
           name: m.name, free_credit: m.free, thinking: m.thinking,
+          kind: m.kind, description: m.description, is_default: m.isDefault,
         })),
       });
     }

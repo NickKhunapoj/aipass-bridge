@@ -97,6 +97,18 @@ async function reloadChatTab() {
 
 /* ------------------------------------------------------------------ render */
 
+// The list now carries image, video and music generators alongside chat models,
+// so a flat 30-entry dropdown would be unusable. Group it the way the web UI's
+// tabs do — the bridge derives the kind, since the loader sends none.
+const KIND_LABELS = {
+  chat: 'สนทนา · Chat',
+  research: 'ค้นคว้าเชิงลึก · Deep research',
+  image: 'สร้างรูปภาพ · Image',
+  video: 'สร้างวิดีโอ · Video',
+  music: 'สร้างเพลง · Music',
+};
+const KIND_ORDER = ['chat', 'research', 'image', 'video', 'music'];
+
 function renderModels(models, selected) {
   // Only rebuild when the list or the selection actually changed.
   const signature = `${models.map((m) => m.id).join('|')}::${selected}`;
@@ -115,7 +127,7 @@ function renderModels(models, selected) {
     sel.append(opt);
   }
 
-  for (const m of models) {
+  const option = (m) => {
     const opt = document.createElement('option');
     opt.value = m.id;
     const bits = [m.name || m.id];
@@ -123,7 +135,21 @@ function renderModels(models, selected) {
     if (m.free) bits.push('· free');
     opt.textContent = bits.join(' ');
     opt.selected = m.id === selected;
-    sel.append(opt);
+    return opt;
+  };
+
+  const kinds = KIND_ORDER.filter((k) => models.some((m) => m.kind === k))
+    .concat([...new Set(models.map((m) => m.kind))].filter((k) => k && !KIND_ORDER.includes(k)));
+
+  if (kinds.length <= 1) {
+    for (const m of models) sel.append(option(m));
+  } else {
+    for (const kind of kinds) {
+      const group = document.createElement('optgroup');
+      group.label = KIND_LABELS[kind] ?? kind;
+      for (const m of models.filter((m) => m.kind === kind)) group.append(option(m));
+      sel.append(group);
+    }
   }
   setText($('count'), models.length ? `(${models.length})` : '');
 }

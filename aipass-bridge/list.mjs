@@ -11,7 +11,8 @@ const what = argv[0] ?? 'models';
 if (argv.some((a) => ['--help', '-h', 'help'].includes(a))) {
   console.log(`usage: npm run models | npm run conversations | npm run credits
 
-  models         list models, marking the free-credit ones
+  models [kind]  list models by category; kind narrows it (chat, research,
+                 image, video, music)
   conversations  list conversations, marking the one in use
   credits        how much of the credit pool is left
 
@@ -29,10 +30,29 @@ const get = async (p) => {
 
 try {
   if (what === 'models') {
-    const { data } = await get('/v1/models');
-    for (const m of data) {
-      console.log(`${m.id.padEnd(38)} ${m.name ?? ''}${m.free_credit ? '  [free]' : ''}`);
+    // The web UI groups these into tabs; the loader sends no category, so the
+    // bridge derives one and this prints in the same order the tabs run.
+    const want = argv[1] && !argv[1].startsWith('-') ? argv[1] : '';
+    const { data } = await get(`/v1/models${want ? `?kind=${encodeURIComponent(want)}` : ''}`);
+    const LABELS = {
+      chat: 'สนทนา · chat',
+      research: 'ค้นคว้าเชิงลึก · deep research',
+      image: 'สร้างรูปภาพ · image',
+      video: 'สร้างวิดีโอ · video',
+      music: 'สร้างเพลง · music',
+    };
+    const order = ['chat', 'research', 'image', 'video', 'music'];
+    const kinds = order.filter((k) => data.some((m) => m.kind === k))
+      .concat([...new Set(data.map((m) => m.kind))].filter((k) => !order.includes(k)));
+
+    for (const kind of kinds) {
+      const group = data.filter((m) => m.kind === kind);
+      console.log(`\n${LABELS[kind] ?? kind}  (${group.length})`);
+      for (const m of group) {
+        console.log(`  ${m.id.padEnd(42)} ${m.name ?? ''}${m.free_credit ? '  [free]' : ''}${m.is_default ? '  [default]' : ''}`);
+      }
     }
+    console.log(`\n${data.length} model(s).`);
   } else if (what === 'conversations') {
     const { current, conversations } = await get('/conversations');
     for (const c of conversations) {
