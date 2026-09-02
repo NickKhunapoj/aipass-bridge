@@ -55,7 +55,7 @@ if (!task) {
   --apply         write changes to disk              (default: dry run)
   --allow-run     let the agent run shell commands   (default: off)
   --max N         max steps                          (default: 10)
-  --max-result N  truncate each tool result          (default: 6000 bytes)`);
+  --max-result N  truncate each tool result          (default: 3000 bytes)`);
   process.exit(1);
 }
 

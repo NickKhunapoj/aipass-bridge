@@ -389,6 +389,26 @@ most recent.
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `text` or `off` |
 | `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
+| `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin to call the bridge — see below |
+| `AIPASS_ALLOWED_HOSTS` | *(unset)* | extra hostnames accepted in the `Host` header |
+| `AIPASS_ADMIN` | *(unset)* | `1` enables the container-management routes |
+
+### Why the bridge is closed by default
+
+The bridge has **no authentication** — anything that can reach it can spend the
+account's credits. So it refuses to be reachable from a web page:
+
+- **No CORS.** The CLI clients ignore CORS and the extension reaches the bridge
+  with host-permission privilege, so neither needs it. Without an
+  `access-control-allow-origin`, a page you happen to visit cannot read (or
+  usefully make) a cross-origin request to `127.0.0.1:8787`. Set
+  `AIPASS_CORS_ORIGIN=https://your.app` only if you deliberately want one.
+- **Host header allowlist.** Only loopback names are accepted, which blocks
+  DNS rebinding — an attacker pointing a domain they own at `127.0.0.1`. Behind
+  a reverse proxy, add the name to `AIPASS_ALLOWED_HOSTS`.
+- **Admin routes off.** `/restart`, `/logs`, `/browser/restart`, `/ext/reload`
+  and `/tab/reload` can restart processes, so they only exist when
+  `AIPASS_ADMIN=1` — which the Docker deployment sets and a local run does not.
 
 The bridge also serves `POST /v1/chat/completions` and `GET /v1/models`, so any
 OpenAI-compatible client can point at `http://127.0.0.1:8787/v1` for plain
