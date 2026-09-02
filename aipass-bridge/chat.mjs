@@ -5,6 +5,8 @@
 //   npm run chat                 interactive
 //   npm run chat -- "question"   one-shot
 import readline from 'node:readline/promises';
+import fs from 'node:fs';
+import path from 'node:path';
 import { stdin, stdout } from 'node:process';
 
 const argv = process.argv.slice(2);
@@ -19,6 +21,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --conversation ID   continue a specific conversation
   --new               start a fresh conversation instead of the most recent
   --bridge URL        bridge base URL       (default: http://127.0.0.1:8787)
+  --ratio R           image aspect ratio    (1:1, 3:4, 4:3 — image models only)
+  --out DIR           where to save generated images   (default: the cwd)
 
 With a question, it answers and exits. Without one it stays interactive, where
 /models lists what is available, /model <id> switches, and Ctrl+C quits.`);
@@ -29,6 +33,8 @@ const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 const CONVERSATION = flag('conversation', null);
 const NEW = argv.includes('--new');
 let model = flag('model', null);
+const OUT_DIR = path.resolve(flag('out', process.cwd()));
+const RATIO = flag('ratio', null);
 const question = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
@@ -60,11 +66,32 @@ if (CONVERSATION) {
   if (made?.id) status.conversation = made.id;
 }
 
+// An image model answers with a data URI, which is megabytes of base64 — write
+// it out and print where it went, rather than filling the scrollback with it.
+let saved = 0;
+function keepImages(chunk) {
+  return chunk.replace(/!\[image\]\((data:([^;,)]+)[^)]*)\)/g, (whole, uri, mime) => {
+    try {
+      const comma = uri.indexOf(',');
+      if (comma === -1) return whole;
+      const ext = (mime.split('/')[1] || 'png').replace(/^jpeg$/, 'jpg');
+      const file = path.join(OUT_DIR, `aipass-${Date.now()}-${++saved}.${ext}`);
+      fs.writeFileSync(file, Buffer.from(uri.slice(comma + 1), 'base64'));
+      return `\n${cyan(`[image saved to ${file}]`)}\n`;
+    } catch (err) {
+      return `\n[image could not be saved: ${err.message}]\n`;
+    }
+  });
+}
+
 async function ask(text) {
   const res = await fetch(`${BRIDGE}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model, stream: true, messages: [{ role: 'user', content: text }] }),
+    body: JSON.stringify({
+      model, stream: true, messages: [{ role: 'user', content: text }],
+      ...(RATIO ? { aspect_ratio: RATIO } : {}),
+    }),
   });
   if (!res.ok) {
     console.error(red(`\nbridge returned ${res.status}: ${(await res.text()).slice(0, 300)}`));
@@ -91,7 +118,7 @@ async function ask(text) {
       const delta = evt.choices?.[0]?.delta ?? {};
       // Tool progress and sources, kept visually distinct from the answer.
       if (delta.reasoning_content) stdout.write(cyan(delta.reasoning_content));
-      if (delta.content) { stdout.write(delta.content); wrote = true; }
+      if (delta.content) { stdout.write(keepImages(delta.content)); wrote = true; }
     }
   }
   stdout.write(wrote ? '\n' : dim('\n(no reply)\n'));

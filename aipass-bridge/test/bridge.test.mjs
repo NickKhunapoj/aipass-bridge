@@ -208,6 +208,48 @@ test('credits are unavailable rather than wrong when no tab is attached', async 
   assert.equal(status.credits, null);
 });
 
+test('a generated image comes back as a markdown image', async (t) => {
+  const png = 'data:image/png;base64,iVBORw0KGgo=';
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => { await e.image(png); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const body = await fetch(`${bridge.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-image-2', messages: [{ role: 'user', content: 'a cat' }] }),
+  }).then((r) => r.json());
+
+  // Chat completions have no field for an image, so it rides in the content
+  // where every client already renders it.
+  assert.match(body.choices[0].message.content, /!\[image\]\(data:image\/png;base64,/);
+});
+
+test('the aspect ratio reaches the extension, and a request can override it', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => { await e.text('ok'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const ask = (extra) => fetch(`${bridge.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-image-2', messages: [{ role: 'user', content: 'a cat' }], ...extra }),
+  }).then((r) => r.json());
+
+  await ask({});
+  assert.equal(ext.chats.at(-1).aspectRatio, '1:1', 'the default the web UI starts on');
+
+  await ask({ aspect_ratio: '3:4' });
+  assert.equal(ext.chats.at(-1).aspectRatio, '3:4');
+
+  await fetch(`${bridge.base}/config`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ aspectRatio: '4:3' }),
+  });
+  await ask({});
+  assert.equal(ext.chats.at(-1).aspectRatio, '4:3', 'config sets it for requests that do not say');
+});
+
 test('config sets the default model and reports it', async () => {
   const handler = scripted(['ok']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();

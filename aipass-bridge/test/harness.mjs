@@ -219,6 +219,7 @@ export class FakeExtension {
     const emit = {
       text: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'text', text: t }] }),
       status: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'status', text: t }] }),
+      image: (url) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'image', text: url }] }),
       done: (finishReason = 'stop') => this.post('/ext/done', { jobId: job.jobId, finishReason }),
       error: (message) => this.post('/ext/error', { jobId: job.jobId, message }),
     };

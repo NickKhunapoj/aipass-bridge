@@ -26,6 +26,9 @@ let defaultModel = process.env.AIPASS_MODEL ?? 'gemini-3.1-flash-lite';
 // name is not yet confirmed from a capture, so it is configurable; the default
 // is the most likely candidate and is harmless if the server ignores it.
 let assistantId = process.env.AIPASS_ASSISTANT_ID ?? '';
+// Only the image models read this; the chat models ignore it. The web UI offers
+// 1:1, 3:4 and 4:3, and a request may override the default per call.
+let aspectRatio = process.env.AIPASS_ASPECT_RATIO ?? '1:1';
 const ASSISTANT_FIELD = process.env.AIPASS_ASSISTANT_FIELD ?? 'aiAssistantId';
 
 // This bridge has no authentication, so it must not be reachable from arbitrary
@@ -167,7 +170,7 @@ const sendToClient = (client, event, data) =>
   client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
 class Job {
-  constructor({ kind = 'chat', modelId, text, parts, conversationId, url, message, requestId, assistant, assistantField, timeoutMs, onDelta, onDone, onError }) {
+  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, timeoutMs, onDelta, onDone, onError }) {
     this.id = randomUUID();
     this.kind = kind;
     this.url = url;
@@ -180,6 +183,7 @@ class Job {
     this.text = text;
     this.parts = parts;
     this.conversationId = conversationId;
+    this.aspectRatio = ratio;
     this.onDelta = onDelta;
     this.onDone = onDone;
     this.onError = onError;
@@ -199,7 +203,7 @@ class Job {
       ? { jobId: this.id, kind: 'loader', url: this.url }
       : this.kind === 'create'
       ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField }
-      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts });
+      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio });
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
   done(value) { if (this.settled) return; this.cleanup(); this.onDone(value ?? 'stop'); }
@@ -376,7 +380,7 @@ async function resolveConversation() {
 
 // A 404 means the conversation was deleted; a 409 means the server still
 // believes a generation is running there. Neither recovers on its own.
-function startChat({ modelId, text, parts, onDelta, onDone, onError }) {
+function startChat({ modelId, text, parts, aspectRatio: ratio, onDelta, onDone, onError }) {
   let attempts = 0;
   let delivered = 0;
   let current = null;
@@ -388,7 +392,7 @@ function startChat({ modelId, text, parts, onDelta, onDone, onError }) {
     catch (err) { return onError(err.message); }
 
     current = new Job({
-      modelId, text, parts, conversationId,
+      modelId, text, parts, conversationId, aspectRatio: ratio,
       onDelta: (part) => { delivered++; onDelta(part); },
       onDone,
       onError: (message) => {
@@ -570,6 +574,9 @@ async function chatCompletions(req, res) {
   catch { return oaiError(res, 400, 'invalid JSON body'); }
 
   const model = String(payload.model ?? defaultModel).replace(/^aipass\//, '');
+  // Not an OpenAI field, so a client that knows about it can send either
+  // spelling; otherwise the bridge default applies.
+  const ratio = String(payload.aspect_ratio ?? payload.imageAspectRatio ?? aspectRatio).trim() || '1:1';
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
 
@@ -595,7 +602,7 @@ async function chatCompletions(req, res) {
     emit({ role: 'assistant', content: '' });
 
     const job = startChat({
-      modelId: model, text, parts,
+      modelId: model, text, parts, aspectRatio: ratio,
       onDelta: (part) => {
         if (part.kind === 'status') {
           if (TOOL_VISIBILITY === 'off') return;
@@ -603,6 +610,9 @@ async function chatCompletions(req, res) {
           else emit({ reasoning_content: `${part.text}\n` });
           return;
         }
+        // Chat completions have no field for a generated image, so it goes into
+        // the content as markdown — which every client already renders.
+        if (part.kind === 'image') return void emit({ content: `\n![image](${part.text})\n` });
         if (part.kind === 'reasoning') emit({ reasoning_content: part.text });
         else emit({ content: part.text });
       },
@@ -625,9 +635,10 @@ async function chatCompletions(req, res) {
   let reasoning = '';
   await new Promise((resolve) => {
     const job = startChat({
-      modelId: model, text, parts,
+      modelId: model, text, parts, aspectRatio: ratio,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
+        if (p.kind === 'image') { out += `\n![image](${p.text})\n`; return; }
         if (p.kind === 'reasoning') reasoning += p.text;
         else out += p.text;
       },
@@ -770,13 +781,17 @@ const server = http.createServer(async (req, res) => {
         log(`default model ${defaultModel}`);
       }
       if (typeof body.assistant === 'string') { assistantId = body.assistant.trim(); log(assistantId ? `assistant ${assistantId}` : 'assistant cleared'); }
+      if (typeof body.aspectRatio === 'string' && body.aspectRatio.trim()) {
+        aspectRatio = body.aspectRatio.trim();
+        log(`aspect ratio ${aspectRatio}`);
+      }
       if (body.conversation === null || typeof body.conversation === 'string') {
         conversationCache = body.conversation || null;
         conversationIndex = 0;
         if (!conversationCache) conversationList = [];
         log(conversationCache ? `conversation ${conversationCache}` : 'conversation cleared');
       }
-      return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, conversation: PINNED_CONVERSATION || conversationCache });
+      return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, aspectRatio, conversation: PINNED_CONVERSATION || conversationCache });
     }
 
     // Container-management routes. Only the Docker deployment needs these, and
@@ -837,6 +852,7 @@ const server = http.createServer(async (req, res) => {
         defaultModel,
         conversation: PINNED_CONVERSATION || conversationCache,
         assistant: assistantId || null,
+        aspectRatio,
         models: cachedModels(),
         credits: quotaCache.value,
       });
