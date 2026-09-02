@@ -102,6 +102,13 @@ npm run chat -- "ช่วยสรุปข่าว AI วันนี้"   #
 In interactive mode: `/models` lists what's available, `/model <id>` switches,
 Ctrl+C quits.
 
+**Pasting a block sends it as one message.** Readline reports one line per
+newline, so a pasted thirteen-line prompt used to become thirteen requests —
+each billed, with the model seeing only the first line as the question. A paste
+arrives as a burst within a few milliseconds, which is how it is told apart from
+someone pressing Enter; `--paste-idle MS` tunes the window if your terminal is
+unusual.
+
 | script | |
 |---|---|
 | `npm run dev` | start the bridge on :8787 |

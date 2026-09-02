@@ -76,3 +76,32 @@ test('an image answer is written to a file instead of the scrollback', async (t)
   // and it is a real PNG, not the base64 text
   assert.equal(fs.readFileSync(path.join(dir, written[0])).subarray(1, 4).toString(), 'PNG');
 });
+
+test('a pasted block is one message, not one per line', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => { await e.text('ok'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  // Exactly how a terminal delivers a paste: every line at once.
+  const pasted = 'line one\nline two\nline three\n';
+  const { out } = await run(CHAT, ['--bridge', bridge.base], { stdin: pasted });
+
+  assert.equal(ext.chats.length, 1, `13-line pastes used to bill 13 requests; got ${ext.chats.length}`);
+  assert.equal(ext.chats[0].text, 'line one\nline two\nline three');
+  assert.match(out, /3 lines · sent as one message/);
+});
+
+test('typed lines stay separate messages', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => { await e.text('ok'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  // Spaced out the way a person types, so the paste heuristic must not merge them.
+  const { out } = await run(CHAT, ['--bridge', bridge.base], {
+    stdin: [[300, 'first\n'], [600, 'second\n']],
+  });
+  assert.equal(ext.chats.length, 2, out);
+  assert.deepEqual(ext.chats.map((c) => c.text), ['first', 'second']);
+});
