@@ -211,3 +211,94 @@ test('creates a conversation and adopts it', async (t) => {
   await post({ messages: [{ role: 'user', content: 'hi' }] });
   assert.equal(ext.chats.at(-1).conversationId, made.id, 'chats go to the new conversation');
 });
+
+/* ------------------------------------------------------------- hardening */
+
+import http from 'node:http';
+
+// fetch() will not let us forge a Host header, so use the raw client.
+function rawRequest(port, { path = '/status', method = 'GET', host } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path, method, headers: host ? { Host: host } : {} },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('rejects an unexpected Host header (DNS-rebinding guard)', async () => {
+  const evil = await rawRequest(bridge.port, { host: 'attacker.example.com' });
+  assert.equal(evil.status, 403, 'a foreign Host must be refused');
+  assert.match(evil.body, /unexpected Host/);
+
+  for (const host of [`127.0.0.1:${bridge.port}`, `localhost:${bridge.port}`]) {
+    const ok = await rawRequest(bridge.port, { host });
+    assert.equal(ok.status, 200, `${host} must be allowed`);
+  }
+});
+
+test('sends no CORS header by default, so no web page can call the bridge', async () => {
+  const res = await fetch(`${bridge.base}/status`);
+  assert.equal(res.headers.get('access-control-allow-origin'), null);
+  assert.equal(res.headers.get('access-control-allow-private-network'), null);
+
+  const pre = await fetch(`${bridge.base}/v1/chat/completions`, { method: 'OPTIONS' });
+  assert.equal(pre.headers.get('access-control-allow-origin'), null, 'preflight must not grant an origin');
+});
+
+test('sends CORS only when AIPASS_CORS_ORIGIN is set', async (t) => {
+  const cors = await startBridge({ AIPASS_CORS_ORIGIN: 'https://example.com' });
+  t.after(() => cors.stop());
+  const res = await fetch(`${cors.base}/status`);
+  assert.equal(res.headers.get('access-control-allow-origin'), 'https://example.com');
+});
+
+test('admin routes are off unless AIPASS_ADMIN=1', async () => {
+  for (const [path, method] of [['/logs', 'GET'], ['/tab/reload', 'POST'], ['/browser/restart', 'POST'], ['/restart', 'POST']]) {
+    const res = await fetch(`${bridge.base}${path}`, { method });
+    assert.equal(res.status, 404, `${path} must not exist without AIPASS_ADMIN`);
+  }
+});
+
+test('with AIPASS_ADMIN=1 the admin routes work and /logs refuses a traversal name', async (t) => {
+  const admin = await startBridge({ AIPASS_ADMIN: '1' });
+  t.after(() => admin.stop());
+
+  const ok = await fetch(`${admin.base}/tab/reload`, { method: 'POST' });
+  assert.equal(ok.status, 200, 'admin route should be reachable');
+
+  for (const bad of ['../../etc/passwd', 'a/b', '..', 'x.y']) {
+    const res = await fetch(`${admin.base}/logs?file=${encodeURIComponent(bad)}`);
+    const body = await res.json();
+    assert.equal(res.status, 400, `"${bad}" must be rejected`);
+    assert.match(body.error, /invalid log name/);
+  }
+});
+
+test('an image URL pointing at a private address is dropped, not fetched', async (t) => {
+  const handler = scripted(['ok']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await post({
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'describe this' },
+        { type: 'image_url', image_url: { url: 'http://127.0.0.1:1/secret.png' } },
+        { type: 'image_url', image_url: { url: 'http://169.254.169.254/latest/meta-data' } },
+      ],
+    }],
+  });
+
+  const job = ext.chats.at(-1);
+  const images = (job.parts ?? []).filter((p) => p.type === 'image');
+  assert.equal(images.length, 0, 'private-network images must never reach the extension');
+  assert.match(job.text, /describe this/, 'the text part still goes through');
+});

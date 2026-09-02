@@ -28,6 +28,32 @@ let defaultModel = process.env.AIPASS_MODEL ?? 'gemini-3.1-flash-lite';
 let assistantId = process.env.AIPASS_ASSISTANT_ID ?? '';
 const ASSISTANT_FIELD = process.env.AIPASS_ASSISTANT_FIELD ?? 'aiAssistantId';
 
+// This bridge has no authentication, so it must not be reachable from arbitrary
+// web pages — anything that can talk to it can spend the account's credits.
+//
+// CORS is therefore OFF by default: the CLI clients ignore CORS entirely and the
+// extension reaches the bridge with host-permission privilege, so neither needs
+// it. Set AIPASS_CORS_ORIGIN only if you deliberately want a browser page to
+// call the bridge. Admin/deployment routes stay off unless AIPASS_ADMIN=1.
+const CORS_ORIGIN = process.env.AIPASS_CORS_ORIGIN ?? '';
+const ADMIN = process.env.AIPASS_ADMIN === '1';
+const ALLOWED_HOSTS = new Set([
+  '127.0.0.1', 'localhost', '::1', '[::1]',
+  ...(process.env.AIPASS_ALLOWED_HOSTS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+]);
+
+// A DNS-rebinding attacker points a name they control at 127.0.0.1 and has the
+// victim's browser POST here. Loopback literals are fine; an unexpected domain
+// in the Host header is not.
+function hostAllowed(req) {
+  const hostname = String(req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase();
+  return !hostname || ALLOWED_HOSTS.has(hostname);
+}
+
+const corsHeaders = () => (CORS_ORIGIN
+  ? { 'access-control-allow-origin': CORS_ORIGIN, 'access-control-allow-private-network': 'true' }
+  : {});
+
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 /* ------------------------------------------------- react-router turbo-stream */
@@ -301,6 +327,23 @@ function startChat({ modelId, text, parts, onDelta, onDone, onError }) {
   return { abort: () => current?.abort() };
 }
 
+// True for loopback, link-local and RFC1918 addresses. A bare domain name is
+// not classified here — that would need DNS resolution — so this blocks the
+// literal-IP SSRF attempts, which is what a URL in a chat message looks like.
+function isPrivateHost(host) {
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '[::1]') return true;
+  if (/^\[?(fe80|fc|fd)/i.test(host)) return true;           // IPv6 link-local / unique-local
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 0 || a === 127 || a === 10) return true;          // this-host, loopback, private
+  if (a === 169 && b === 254) return true;                    // link-local incl. cloud metadata
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;           // 172.16.0.0/12
+  return false;
+}
+
 // Fetch remote image and convert to Base64 Data URI with SSRF guard
 async function fetchRemoteImageAsDataUri(urlStr) {
   const parsed = new URL(urlStr);
@@ -308,7 +351,7 @@ async function fetchRemoteImageAsDataUri(urlStr) {
     throw new Error(`unsupported protocol: ${parsed.protocol}`);
   }
   const host = parsed.hostname.toLowerCase();
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('172.16.') || host.startsWith('172.17.') || host.startsWith('172.18.') || host.startsWith('172.19.') || host.startsWith('172.2') || host.startsWith('172.30.') || host.startsWith('172.31.')) {
+  if (isPrivateHost(host)) {
     throw new Error(`refusing private/internal network fetch: ${host}`);
   }
 
@@ -377,12 +420,22 @@ async function extractUserParts(messages) {
           }
         }
       } else if (item.type === 'image' || item.type === 'file') {
+        // Same handling as image_url: a remote URL goes through the SSRF guard
+        // and arrives as a data URI, so the extension never fetches it.
         const raw = item.image || item.url || item.data || '';
         if (typeof raw === 'string' && raw.trim()) {
-          parts.push({
-            type: 'image',
-            image: raw.trim()
-          });
+          const s = raw.trim();
+          let dataUri = '';
+          if (s.startsWith('data:')) {
+            dataUri = s;
+          } else if (/^https?:\/\//i.test(s)) {
+            try {
+              dataUri = await fetchRemoteImageAsDataUri(s);
+            } catch (err) {
+              log(`warning: failed to fetch remote image ${s}: ${err.message}`);
+            }
+          }
+          if (dataUri) parts.push({ type: 'image', image: dataUri });
         }
       }
     }
@@ -418,7 +471,7 @@ function json(res, status, obj) {
   res.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(body),
-    'access-control-allow-origin': '*',
+    ...corsHeaders(),
   });
   res.end(body);
 }
@@ -448,7 +501,7 @@ async function chatCompletions(req, res) {
       'cache-control': 'no-cache, no-transform',
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
-      'access-control-allow-origin': '*',
+      ...corsHeaders(),
     });
     const emit = (delta, finish = null) => {
       res.write(`data: ${JSON.stringify({
@@ -526,8 +579,7 @@ function extEvents(req, res) {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache, no-transform',
     connection: 'keep-alive',
-    'access-control-allow-origin': '*',
-    'access-control-allow-private-network': 'true',
+    ...corsHeaders(),
   });
   const client = { id: randomUUID(), res };
   extClients.add(client);
@@ -568,12 +620,18 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
+  if (!hostAllowed(req)) {
+    res.writeHead(403, { 'content-type': 'text/plain' });
+    return res.end('forbidden: unexpected Host header\n');
+  }
+
   if (req.method === 'OPTIONS') {
+    // Without an explicit AIPASS_CORS_ORIGIN this preflight carries no
+    // allow-origin, so a browser page cannot call the bridge cross-origin.
     res.writeHead(204, {
-      'access-control-allow-origin': '*',
+      ...corsHeaders(),
       'access-control-allow-methods': 'GET,POST,OPTIONS',
       'access-control-allow-headers': '*',
-      'access-control-allow-private-network': 'true',
       'access-control-max-age': '86400',
     });
     return res.end();
@@ -622,39 +680,48 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, conversation: PINNED_CONVERSATION || conversationCache });
     }
 
-    if (path === '/restart' && req.method === 'POST') {
-      json(res, 200, { ok: true, message: 'restarting bridge server' });
-      setTimeout(() => process.exit(0), 50);
-      return;
-    }
-
-    if (path === '/logs') {
-      const fs = await import('node:fs');
-      const target = url.searchParams.get('file') || 'bridge';
-      const logFile = `/var/log/${target}.log`;
-      try {
-        const content = fs.readFileSync(logFile, 'utf8');
-        return json(res, 200, { ok: true, file: logFile, lines: content.slice(-4000) });
-      } catch (err) {
-        return json(res, 500, { ok: false, error: err.message });
+    // Container-management routes. Only the Docker deployment needs these, and
+    // they can restart processes, so they stay off unless AIPASS_ADMIN=1.
+    if (ADMIN) {
+      if (path === '/restart' && req.method === 'POST') {
+        json(res, 200, { ok: true, message: 'restarting bridge server' });
+        setTimeout(() => process.exit(0), 50);
+        return;
       }
-    }
 
-    if (path === '/browser/restart' && req.method === 'POST') {
-      import('node:child_process').then(({ exec }) => {
-        exec('pkill -f chromium || pkill -f chrome || true');
-      });
-      return json(res, 200, { ok: true, message: 'restarting browser' });
-    }
+      if (path === '/logs') {
+        const fs = await import('node:fs');
+        const target = url.searchParams.get('file') || 'bridge';
+        // Whitelist the name: this is interpolated into a path, so anything
+        // with a separator or dot would escape /var/log.
+        if (!/^[a-z0-9_-]+$/i.test(target)) {
+          return json(res, 400, { ok: false, error: 'invalid log name' });
+        }
+        const logFile = `/var/log/${target}.log`;
+        try {
+          const content = fs.readFileSync(logFile, 'utf8');
+          return json(res, 200, { ok: true, file: logFile, lines: content.slice(-4000) });
+        } catch (err) {
+          return json(res, 500, { ok: false, error: err.message });
+        }
+      }
 
-    if (path === '/ext/reload' && req.method === 'POST') {
-      for (const client of extClients) sendToClient(client, 'reload_extension', {});
-      return json(res, 200, { ok: true, message: 'reloading extension' });
-    }
+      if (path === '/browser/restart' && req.method === 'POST') {
+        import('node:child_process').then(({ exec }) => {
+          exec('pkill -f chromium || pkill -f chrome || true');
+        });
+        return json(res, 200, { ok: true, message: 'restarting browser' });
+      }
 
-    if (path === '/tab/reload' && req.method === 'POST') {
-      for (const client of extClients) sendToClient(client, 'reload_tab', {});
-      return json(res, 200, { ok: true, message: 'reloading tab' });
+      if (path === '/ext/reload' && req.method === 'POST') {
+        for (const client of extClients) sendToClient(client, 'reload_extension', {});
+        return json(res, 200, { ok: true, message: 'reloading extension' });
+      }
+
+      if (path === '/tab/reload' && req.method === 'POST') {
+        for (const client of extClients) sendToClient(client, 'reload_tab', {});
+        return json(res, 200, { ok: true, message: 'reloading tab' });
+      }
     }
 
     if (path === '/ext/events' && req.method === 'GET') return extEvents(req, res);
