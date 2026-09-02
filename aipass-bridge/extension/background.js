@@ -14,8 +14,14 @@ let connected = false;
 let lastError = '';
 const jobTabs = new Map();
 
-const bridgeUrl = async () =>
-  (await chrome.storage.local.get('bridgeUrl')).bridgeUrl || DEFAULT_BRIDGE;
+const bridgeUrl = async () => {
+  try {
+    const res = await chrome.storage.local.get('bridgeUrl');
+    return res?.bridgeUrl || DEFAULT_BRIDGE;
+  } catch {
+    return DEFAULT_BRIDGE;
+  }
+};
 
 async function post(path, body) {
   try {
@@ -26,11 +32,12 @@ async function post(path, body) {
     });
   } catch (err) {
     lastError = String(err?.message ?? err);
+    console.warn('[aipass-bg] POST error:', path, lastError);
   }
 }
 
 async function findChatTab() {
-  const tabs = await chrome.tabs.query({ url: 'https://de.aipass.net/*' });
+  const tabs = await chrome.tabs.query({ url: ['https://*.aipass.net/*', 'https://aipass.net/*'] });
   if (!tabs.length) return null;
   const live = tabs.filter((t) => !t.discarded && t.status !== 'unloaded');
   const pool = live.length ? live : tabs;
@@ -182,7 +189,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // The worker can be evicted at any time; the alarm brings it back and the
 // connect() guard makes a duplicate call harmless.
-chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
+chrome.alarms.create('keepalive', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener(() => connect());
 chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
