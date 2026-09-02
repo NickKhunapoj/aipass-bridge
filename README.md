@@ -23,7 +23,11 @@ your terminal ──▶ OpenAI-compatible API on localhost:8787 ──▶ a real
 ```
 
 - **Chat from the terminal**, streaming, with web search and sources.
+- **Every model the account has** — 34 of them, including the image, video and
+  music generators, grouped the way the web UI groups them.
+- **Generate images** — pick an image model, get a PNG.
 - **Edit local files** — an agent that reads, searches, and edits a project you point it at.
+- **See what it costs** — the credit pool, in the popup and after every agent run.
 - **Drop-in OpenAI endpoint** — point the `openai` SDK, or any tool that takes a base URL, at it.
 - **Run it headless** on a server so it stays up without your laptop.
 
@@ -42,8 +46,25 @@ Then load the extension — `chrome://extensions` → Developer mode → **Load 
 tab. The extension popup should read **Connected**.
 
 ```bash
-npm run chat -- "ช่วยสรุปข่าว AI วันนี้"        # chat, streaming
-npm run agent -- "add a /health route" --root .   # edit local files (dry run)
+npm run doctor                                     # is every link working?
+npm run chat -- "ช่วยสรุปข่าว AI วันนี้"         # chat, streaming
+npm run chat -- "แมวน่ารัก" --model gpt-image-2   # generate an image
+npm run agent -- "add a /health route" --root .    # edit local files (dry run)
+npm run models                                     # everything, by category
+npm run credits                                    # what is left of the pool
+```
+
+Note the `--` before a script's own flags: `npm run chat --new` is npm's flag,
+`npm run chat -- --new` is the script's. Every command takes `-- --help`.
+
+If something is not working, `npm run doctor` walks the chain and names the one
+thing to fix:
+
+```
+✓ bridge         responding
+✗ extension      no tab attached
+                 → open https://de.aipass.net/chat and leave it open
+– login          skipped — nothing attached to ask
 ```
 
 Use it from code like any OpenAI endpoint:
@@ -56,7 +77,8 @@ client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="sk-dummy")
 ## Docs
 
 **→ [Full documentation](aipass-bridge/README.md)** — setup, the coding assistant, the
-agent's action set, conversations, configuration, and tests.
+agent's action set, models and image generation, credits, conversations,
+configuration, and tests.
 
 **→ [Headless deployment](aipass-bridge/deploy/README.md)** — Docker + noVNC, for
 running it 24/7 on a server.
