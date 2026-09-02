@@ -5,8 +5,9 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const HERE = new URL('.', import.meta.url).pathname;
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SERVER = path.join(HERE, '..', 'bridge', 'server.mjs');
 export const AGENT = path.join(HERE, '..', 'agent.mjs');
 export const CHAT = path.join(HERE, '..', 'chat.mjs');
