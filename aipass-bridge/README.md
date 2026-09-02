@@ -3,9 +3,7 @@
 Use [de.aipass.net](https://de.aipass.net/chat) from your terminal, with
 streaming.
 
-<img width="2048" height="1055" alt="image" src="https://github.com/user-attachments/assets/fa865ce3-7cf1-41f9-b98e-1f5a489a7619" />
-
-<img width="2048" height="1332" alt="image" src="https://github.com/user-attachments/assets/101dcb7c-8e20-47f1-8858-de43aa06bc8f" />
+<img width="1470" height="785" alt="image" src="https://github.com/user-attachments/assets/95bc87b5-6463-49f4-85b4-3134d9364998" />
 
 <img width="2048" height="1332" alt="image" src="https://github.com/user-attachments/assets/d9115273-2585-4eeb-808e-3c6368b985a7" />
 
