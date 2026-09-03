@@ -176,7 +176,7 @@
       buffer = [];
     };
     const ticker = setInterval(flush, 40);
-    const push = (kind, text) => { if (text) buffer.push({ kind, text }); };
+    const push = (kind, text, filename) => { if (text) buffer.push({ kind, text, ...(filename ? { filename } : {}) }); };
 
     try {
       // Process parts: upload any image blobs and get their storageKey
@@ -328,13 +328,18 @@
             // back as a data URI. Anything already absolute, or too big to
             // carry, goes back as a plain URL instead.
             case 'file': {
-              const url = evt.url ?? evt.data?.url ?? '';
+              const d = evt.data ?? {};
+              // Music comes back with `url`; video has no `url` at all, only
+              // `snapshotUrl` beside `storageKey` and `filename`. Reading just
+              // `url` dropped every generated video on the floor.
+              const url = evt.url ?? evt.snapshotUrl ?? d.url ?? d.snapshotUrl ?? '';
               if (!url) break;
-              const mediaType = evt.mediaType ?? evt.data?.mediaType ?? '';
+              const mediaType = evt.mediaType ?? d.mediaType ?? '';
+              const filename = evt.filename ?? d.filename ?? '';
               // The kind decides how the client renders it: an mp4 in an image
               // tag is a broken image, not a video.
               const kind = mediaKind(mediaType) || (/^data:/i.test(url) ? mediaKind(url.slice(5)) : '') || 'file';
-              if (/^data:/i.test(url)) { push(kind, url); break; }
+              if (/^data:/i.test(url)) { push(kind, url, filename); break; }
               // Say what arrived before any fetching. A generation takes about a
               // minute, and this is the first sign the caller gets that it
               // produced something.
@@ -362,7 +367,7 @@
                   push('status', `[${kind}] could not read it here (${err?.message ?? err}), sending the link`);
                 }
               }
-              push(kind, carried || new URL(url, location.origin).href);
+              push(kind, carried || new URL(url, location.origin).href, filename);
               break;
             }
             case 'source-url':

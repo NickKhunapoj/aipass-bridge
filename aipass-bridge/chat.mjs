@@ -135,20 +135,28 @@ const writeMedia = (buf, mime, label) => {
 // Generated media arrives as markdown: an image tag for pictures, a link for a
 // video or a music clip. Either way the payload is a data: URI to decode, or a
 // URL to go and fetch — a link nobody downloads is not much of a result.
+// The extensions a generator can hand back. A link is only chased when it looks
+// like one of these: a citation in the prose is a link too, and fetching those
+// would be both wrong and slow.
+const MEDIA_EXT = new Set(['mp4', 'webm', 'mov', 'mkv', 'mp3', 'wav', 'ogg', 'm4a', 'flac', 'png', 'jpg', 'jpeg', 'gif', 'webp']);
+
 function keepMedia(chunk) {
   return chunk.replace(/(!?)\[([^\]]*)\]\((data:([^;,)]+)[^)]*|https?:\/\/[^)\s]+)\)/g, (whole, bang, label, target, mime) => {
-    const kind = bang ? 'image' : (label.split('.')[0] || 'file');
+    // The label is a filename when the part carried one (video does, music does
+    // not), otherwise a bare kind. Either way what matters is the extension.
+    const labelExt = label.split('.').pop()?.toLowerCase() ?? '';
+    const urlExt = target.split('?')[0].split('.').pop()?.toLowerCase() ?? '';
+    const kind = bang ? 'image' : label.includes('.') ? label : (label || 'file');
     try {
       if (target.startsWith('data:')) {
         const comma = target.indexOf(',');
         if (comma === -1) return whole;
         return writeMedia(Buffer.from(target.slice(comma + 1), 'base64'), mime, kind);
       }
-      // A remote link is only worth chasing when it is the media itself; a
-      // citation in the prose is not, and those are plain text, not a link.
-      if (!bang && !['video', 'audio', 'image', 'file'].includes(kind)) return whole;
+      if (!bang && !['video', 'audio', 'image', 'file'].includes(label)
+        && !MEDIA_EXT.has(labelExt) && !MEDIA_EXT.has(urlExt)) return whole;
       pending.push({ url: target, kind });
-      return `\n${cyan(`[${kind} at ${target} — downloading]`)}\n`;
+      return `\n${cyan(`[${kind} at ${target.split('?')[0]} — downloading]`)}\n`;
     } catch (err) {
       return `\n[${kind} could not be saved: ${err.message}]\n`;
     }

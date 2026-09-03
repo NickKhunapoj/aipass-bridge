@@ -668,12 +668,13 @@ const oaiError = (res, status, message, type = 'invalid_request_error') =>
 // image tag; a video or a music clip gets a link, because an mp4 in an image
 // tag is a broken image in every renderer there is.
 const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'file']);
-function mediaMarkdown(kind, target) {
+function mediaMarkdown(kind, target, filename) {
   if (kind === 'image') return `\n![image](${target})\n`;
+  // A video part carries its own filename; music does not. Failing that, the
+  // signed storage URL's path holds the real extension before the query
+  // (…/01a065ef.mp3?X-Goog-Signature=…), and a data URI declares it in the mime.
+  if (filename) return `\n[${filename}](${target})\n`;
   const name = ['video', 'audio', 'file'].includes(kind) ? kind : 'file';
-  // Generated media arrives as a signed storage URL whose path carries the real
-  // extension (…/01a065ef.mp3?X-Goog-Signature=…); a data URI declares it in the
-  // mime instead. Either way the label should say what the file is.
   const ext = (target.match(/^data:([^;,]+)/)?.[1]?.split('/')[1]
     ?? target.split('?')[0].match(/\.([a-z0-9]{2,4})$/i)?.[1] ?? '').replace(/[^a-z0-9]/gi, '');
   return `\n[${ext ? `${name}.${ext}` : name}](${target})\n`;
@@ -727,7 +728,7 @@ async function chatCompletions(req, res) {
           else emit({ reasoning_content: `${part.text}\n` });
           return;
         }
-        if (MEDIA_KINDS.has(part.kind)) return void emit({ content: mediaMarkdown(part.kind, part.text) });
+        if (MEDIA_KINDS.has(part.kind)) return void emit({ content: mediaMarkdown(part.kind, part.text, part.filename) });
         if (part.kind === 'reasoning') emit({ reasoning_content: part.text });
         else emit({ content: part.text });
       },
@@ -753,7 +754,7 @@ async function chatCompletions(req, res) {
       modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
-        if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text); return; }
+        if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text, p.filename); return; }
         if (p.kind === 'reasoning') reasoning += p.text;
         else out += p.text;
       },
