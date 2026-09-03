@@ -247,7 +247,7 @@ export class FakeExtension {
       image: (url) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'image', text: url }] }),
       // Generated media of any kind — the extension routes by media type, so a
       // video arrives as kind 'video' rather than being called an image.
-      media: (kind, url) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind, text: url }] }),
+      media: (kind, url, filename) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind, text: url, ...(filename ? { filename } : {}) }] }),
       done: (finishReason = 'stop') => this.post('/ext/done', { jobId: job.jobId, finishReason }),
       error: (message) => this.post('/ext/error', { jobId: job.jobId, message }),
     };

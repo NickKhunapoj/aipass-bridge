@@ -594,3 +594,25 @@ test('a video model gets a longer silence allowance than a chat model', async (t
   assert.ok(Date.now() - started > 1000, 'the video job must outlive the chat timeout');
   video.catch(() => {});
 });
+
+// The exact part a seedance-2.0-mini run returns. Note there is no `url`: the
+// extension reads snapshotUrl, and a video carries its own filename where music
+// does not.
+test('a video part is labelled with the filename it carries', async (t) => {
+  const url = 'https://storage.googleapis.com/aip-prd-chat-bucket/video-generations/2157/19d3/01a065f9.mp4'
+    + '?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Expires=86400&X-Goog-Signature=ace3722b';
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => {
+      await e.text('Generated video from prompt: "a calm street in Bangkok at night" (seedance)');
+      await e.media('video', url, '01a065f9-b680-70ee-9b8b-9af350dd4fd7.mp4');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const body = await (await post({ model: 'seedance-2.0-mini', messages: [{ role: 'user', content: 'a street' }] })).json();
+  const content = body.choices[0].message.content;
+  assert.match(content, /\[01a065f9-b680-70ee-9b8b-9af350dd4fd7\.mp4\]\(https:\/\/storage\.googleapis\.com\//);
+  assert.ok(content.includes('X-Goog-Signature=ace3722b'), 'the signature must survive or the link is dead');
+  assert.match(content, /Generated video from prompt/, 'the text part rides alongside the file');
+});

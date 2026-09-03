@@ -145,7 +145,7 @@ test('a generated video is decoded to disk, not left as a data URI', async (t) =
 
   const dir = tempDir({});
   const { out } = await chat(['a cat', '--model', 'veo-3.1-fast-generate-001', '--out', dir]);
-  assert.match(out, /video saved to/);
+  assert.match(out, /video\.mp4 saved to/);
   const written = fs.readdirSync(dir).filter((f) => f.endsWith('.mp4'));
   assert.equal(written.length, 1, 'the extension must come from the media type');
   assert.deepEqual(fs.readFileSync(path.join(dir, written[0])), mp4);
@@ -170,7 +170,7 @@ test('a video delivered as a link is downloaded once the answer is printed', asy
   const dir = tempDir({});
   const { out } = await chat(['a cat', '--model', 'veo-3.1-fast-generate-001', '--out', dir]);
   assert.match(out, /downloading/);
-  assert.match(out, /video saved to/);
+  assert.match(out, /saved to/);
   const written = fs.readdirSync(dir).filter((f) => f.endsWith('.mp4'));
   assert.deepEqual(fs.readFileSync(path.join(dir, written[0])), body);
 });
@@ -184,4 +184,28 @@ test('an unreachable link says why instead of failing silently', async (t) => {
   const { out } = await chat(['a cat', '--model', 'veo-3.1-fast-generate-001', '--out', tempDir({})]);
   assert.match(out, /could not be downloaded/);
   assert.match(out, /signed link may have expired/);
+});
+
+test('a video link labelled with a filename is still downloaded', async (t) => {
+  const body = Buffer.from('fake mp4');
+  const origin = await new Promise((resolve) => {
+    const srv = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'video/mp4' });
+      res.end(body);
+    });
+    srv.listen(0, '127.0.0.1', () => resolve({ url: `http://127.0.0.1:${srv.address().port}/01a065f9.mp4?X-Goog-Signature=abc`, srv }));
+  });
+  t.after(() => origin.srv.close());
+
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.media('video', origin.url, '01a065f9-b680-70ee-9b8b-9af350dd4fd7.mp4'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const dir = tempDir({});
+  const { out } = await chat(['a street', '--model', 'seedance-2.0-mini', '--out', dir]);
+  assert.match(out, /downloading/, 'a uuid filename must not stop the link being chased');
+  assert.ok(!out.includes('X-Goog-Signature'), 'the signature is noise in the terminal');
+  const written = fs.readdirSync(dir).filter((f) => f.endsWith('.mp4'));
+  assert.deepEqual(fs.readFileSync(path.join(dir, written[0])), body);
 });

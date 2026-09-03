@@ -28,7 +28,8 @@ your terminal ──▶ OpenAI-compatible API on localhost:8787 ──▶ a real
 - **Generate images** — pick an image model, get a PNG
   ([example](aipass-bridge/README.md#a-worked-example)).
 - **Attach documents** — `--file report.pdf`, and ask about it.
-- **Video and music too** — Veo, Seedance and Lyria, saved to disk like images.
+- **Video and music too** — Seedance, Veo and Lyria, saved to disk like images
+  ([clip](aipass-bridge/README.md#video-from-a-real-run)).
 - **Edit local files** — an agent that reads, searches, and edits a project you point it at.
 - **See what it costs** — the credit pool, in the popup and after every agent run.
 - **Drop-in OpenAI endpoint** — point the `openai` SDK, or any tool that takes a base URL, at it.
