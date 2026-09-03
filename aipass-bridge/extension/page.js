@@ -10,12 +10,12 @@
 
   const TAG = '__aipass_bridge';
   const inflight = new Map();
-  // Above this, an image goes back as a link rather than as bytes: the bridge
-  // caps a POST body at 8 MB and base64 costs a third on top.
-  // How many bytes of generated media may be carried back inline as a data URI.
-  // Video and music are much larger than an image and the base64 costs another
-  // third, but a same-origin link is useless outside this browser — so they get
-  // a bigger allowance rather than a link by default.
+  // How many bytes of media may be carried back inline as a data URI; above
+  // this it goes back as a link, since the bridge caps a POST body at 8 MB and
+  // base64 costs a third on top. This only applies to a same-origin URL that
+  // needs this page's cookie: a *generated* image, video or music clip comes
+  // back as a signed storage.googleapis.com link that anything can fetch, and
+  // is passed straight through.
   const INLINE_CAP = {
     image: 5 * 1024 * 1024,
     audio: 25 * 1024 * 1024,
@@ -335,13 +335,17 @@
               // tag is a broken image, not a video.
               const kind = mediaKind(mediaType) || (/^data:/i.test(url) ? mediaKind(url.slice(5)) : '') || 'file';
               if (/^data:/i.test(url)) { push(kind, url); break; }
+              // Say what arrived before any fetching. A generation takes about a
+              // minute, and this is the first sign the caller gets that it
+              // produced something.
+              push('status', `[${kind}] ${mediaType || 'unknown type'}`);
               let carried = '';
               if (!/^https?:\/\//i.test(url) || url.startsWith(location.origin)) {
                 try {
                   const r = await fetch(url, { credentials: 'include', signal: controller.signal });
                   const blob = await r.blob();
                   const cap = INLINE_CAP[kind] ?? INLINE_CAP.file;
-                  push('status', `[${kind}] ${mediaType || blob.type || 'unknown type'}, ${(blob.size / 1048576).toFixed(2)} MB`);
+                  push('status', `[${kind}] ${(blob.size / 1048576).toFixed(2)} MB`);
                   if (blob.size <= cap) {
                     carried = await new Promise((resolve, reject) => {
                       const fr = new FileReader();
@@ -350,9 +354,9 @@
                       fr.readAsDataURL(blob);
                     });
                   } else {
-                    // A link is only useful to the caller if it can be fetched
-                    // without this page's cookie, so say which case this is.
-                    push('status', `[${kind}] over the ${(cap / 1048576).toFixed(0)} MB inline limit — sending the link, which may need a logged-in browser`);
+                    // This branch is same-origin only, so the link it falls back
+                    // to does need the session cookie. Say so.
+                    push('status', `[${kind}] over the ${(cap / 1048576).toFixed(0)} MB inline limit — sending the link, which needs a logged-in browser`);
                   }
                 } catch (err) {
                   push('status', `[${kind}] could not read it here (${err?.message ?? err}), sending the link`);

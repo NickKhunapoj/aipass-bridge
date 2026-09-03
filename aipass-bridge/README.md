@@ -529,21 +529,33 @@ is a broken image in every renderer there is. `npm run chat` saves either kind
 to `--out`, decoding a data URI or downloading a link once the answer has
 finished printing.
 
-Two things are different about video and music, and both are worth knowing
-before you spend a generation on them:
+What a generation actually returns, from a real `lyria-3-clip-preview` run:
 
+```json
+{"type":"file","mediaType":"audio/mpeg","url":"https://storage.googleapis.com/…?X-Goog-Signature=…"}
+```
+
+Three things follow from that, and all three are worth knowing before you spend
+a generation:
+
+- **It streams; there is no job to poll.** The request stays open for the whole
+  render — about 65 seconds for a 30-second clip, and longer for video. The
+  bridge's timeout is on silence rather than total time, but a quiet minute is
+  normal here, so video and music models get a much longer allowance:
+  `AIPASS_MEDIA_TIMEOUT_MS`, 15 minutes by default. Chat keeps the usual
+  `AIPASS_IDLE_TIMEOUT_MS`.
+- **The link is signed, public, and short-lived.** It is a
+  `storage.googleapis.com` URL with a `X-Goog-Signature`, fetchable by anything
+  with no cookie — which is why `npm run chat` can download it — but it carries
+  `X-Goog-Expires`, six to twenty-four hours. A link from an old conversation
+  will be dead, and the CLI says so rather than failing silently.
 - **Video has its own quota**, separate from the credit pool: ten a month on a
-  standard account. `npm run credits` reports it.
-- **Rendering goes quiet for minutes.** The bridge's timeout is on silence
-  rather than on total time, but three minutes of silence is normal here, so
-  video and music models get a much longer allowance —
-  `AIPASS_MEDIA_TIMEOUT_MS`, 15 minutes by default. A chat model keeps the
-  usual `AIPASS_IDLE_TIMEOUT_MS`.
+  standard account. `npm run credits` reports it. Music does not count against
+  it, which makes `lyria-3-clip-preview` the cheap way to test this path.
 
-A clip too large to carry back inline (over 50 MB for video, 25 MB for audio)
-comes back as a link instead of the bytes. Those links are usually same-origin
-and need the session cookie, so they open in the logged-in browser but cannot
-be downloaded by the CLI — which says so rather than failing silently.
+The inline caps (50 MB video, 25 MB audio, 5 MB image) apply only to
+same-origin media that needs the session cookie — an uploaded file served back,
+not a generated one. Generated media is passed through as its signed link.
 
 ### A worked example
 

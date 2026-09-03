@@ -670,8 +670,12 @@ const oaiError = (res, status, message, type = 'invalid_request_error') =>
 const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'file']);
 function mediaMarkdown(kind, target) {
   if (kind === 'image') return `\n![image](${target})\n`;
-  const name = { video: 'video', audio: 'audio', file: 'file' }[kind] ?? 'file';
-  const ext = (target.match(/^data:([^;,]+)/)?.[1]?.split('/')[1] || '').replace(/[^a-z0-9]/gi, '');
+  const name = ['video', 'audio', 'file'].includes(kind) ? kind : 'file';
+  // Generated media arrives as a signed storage URL whose path carries the real
+  // extension (…/01a065ef.mp3?X-Goog-Signature=…); a data URI declares it in the
+  // mime instead. Either way the label should say what the file is.
+  const ext = (target.match(/^data:([^;,]+)/)?.[1]?.split('/')[1]
+    ?? target.split('?')[0].match(/\.([a-z0-9]{2,4})$/i)?.[1] ?? '').replace(/[^a-z0-9]/gi, '');
   return `\n[${ext ? `${name}.${ext}` : name}](${target})\n`;
 }
 

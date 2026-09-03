@@ -175,7 +175,7 @@ test('a video delivered as a link is downloaded once the answer is printed', asy
   assert.deepEqual(fs.readFileSync(path.join(dir, written[0])), body);
 });
 
-test('a link that needs a browser session says so instead of failing silently', async (t) => {
+test('an unreachable link says why instead of failing silently', async (t) => {
   const ext = await new FakeExtension(bridge.base, {
     onChat: async (_j, e) => { await e.media('video', 'http://127.0.0.1:1/private.mp4'); await e.done(); },
   }).connect();
@@ -183,5 +183,5 @@ test('a link that needs a browser session says so instead of failing silently', 
 
   const { out } = await chat(['a cat', '--model', 'veo-3.1-fast-generate-001', '--out', tempDir({})]);
   assert.match(out, /could not be downloaded/);
-  assert.match(out, /logged-in browser/);
+  assert.match(out, /signed link may have expired/);
 });
