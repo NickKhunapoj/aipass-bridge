@@ -404,3 +404,49 @@ test('an image URL pointing at a private address is dropped, not fetched', async
   assert.equal(images.length, 0, 'private-network images must never reach the extension');
   assert.match(job.text, /describe this/, 'the text part still goes through');
 });
+
+test('creates a temporary conversation and repeats the flag on every turn', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  const made = await (await fetch(`${bridge.base}/conversations/new`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ temporary: true }),
+  })).json();
+
+  // the temporary intent is used, and no first message is needed
+  assert.equal(ext.created.at(-1).temporary, true);
+  assert.equal(made.temporary, true);
+  // the id comes from the conversation object, not a conversationId field
+  assert.equal(made.id, 'M5uhmgOBsPk0v4WN');
+
+  await post({ messages: [{ role: 'user', content: 'hi' }] });
+  const chat = ext.chats.at(-1);
+  assert.equal(chat.conversationId, 'M5uhmgOBsPk0v4WN');
+  assert.equal(chat.temporary, true, 'every turn must repeat isTemporary');
+});
+
+test('a normal conversation is not marked temporary', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await (await fetch(`${bridge.base}/conversations/new`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: 'hello' }),
+  })).json();
+
+  assert.ok(!ext.created.at(-1).temporary);
+  await post({ messages: [{ role: 'user', content: 'hi' }] });
+  assert.ok(!ext.chats.at(-1).temporary);
+});
+
+test('passes a valid thinking level through and drops a bogus one', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({ messages: [{ role: 'user', content: 'hi' }], thinking_level: 'high' });
+  assert.equal(ext.chats.at(-1).thinkingLevel, 'high');
+
+  await post({ messages: [{ role: 'user', content: 'hi' }], thinking_level: 'ludicrous' });
+  assert.equal(ext.chats.at(-1).thinkingLevel, undefined, 'an unknown level must not be forwarded');
+});

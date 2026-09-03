@@ -174,6 +174,14 @@ for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta?.
 Send an `image_url` content part and the bridge uploads the image to aipass and
 attaches it — vision works on models that support it.
 
+Two extra fields go beyond the OpenAI schema, and both are ignored by clients
+that do not know them:
+
+| field | values | effect |
+| --- | --- | --- |
+| `thinking_level` | `low`, `medium`, `high` | how long a reasoning model thinks before answering. Anything else is dropped rather than sent. |
+| `aspect_ratio` | `1:1`, `3:4`, `4:3` | the shape of a generated image (see [Generating an image](#generating-an-image)). |
+
 ## Scope, and why
 
 Only the user's message is sent. Not a system prompt, not a transcript.
@@ -382,15 +390,26 @@ which is why ids look the way they do.
 
 ```bash
 curl -s localhost:8787/conversations/new -H 'content-type: application/json' -d '{"message":"hello"}'
+curl -s localhost:8787/conversations/new -H 'content-type: application/json' -d '{"temporary":true}'
 npm run conversations     # list them, marking the one in use
 ```
 
-**`npm run agent` starts a fresh conversation for every run.** A conversation
-carries its own history, so reusing one drags in whatever was said before —
-including a refusal, which the model then sees itself having made and repeats.
-`--reuse` continues the most recent instead, `--conversation ID` continues a
-specific one. `npm run chat` continues the most recent by default, since that is
-what makes a chat a chat; `--new` starts a clean one.
+`{"temporary":true}` uses `intent=create-temporary-chat` instead. A temporary
+conversation is never listed in the account's chat history and carries an
+`expiresAt` about a year out; it needs no opening message, since the point is
+that nothing is kept. The flag has to be repeated on every message, so the
+bridge remembers it per conversation and sends `isTemporary` on each turn —
+including for a temporary conversation picked up again by `--reuse`.
+
+**`npm run agent` starts a fresh temporary conversation for every run.** A
+conversation carries its own history, so reusing one drags in whatever was said
+before — including a refusal, which the model then sees itself having made and
+repeats. Temporary conversations never appear in the account's chat history and
+expire on their own, so a week of agent runs leaves the sidebar as it was.
+`--permanent` saves the run like an ordinary conversation, `--reuse` continues
+the most recent instead, and `--conversation ID` continues a specific one.
+`npm run chat` continues the most recent by default, since that is what makes a
+chat a chat; `--new` starts a clean one, `--new --temporary` a throwaway one.
 
 Posting to an invented id returns `404 Conversation not found`, and a
 conversation that stops accepting messages (`404` when deleted, `409` when the

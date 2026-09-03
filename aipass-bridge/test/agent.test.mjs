@@ -234,13 +234,27 @@ test('shell commands are refused unless --allow-run is given', async (t) => {
   assert.match(out, /disabled for this run/);
 });
 
-test('starts its own conversation by default', async (t) => {
+test('starts its own temporary conversation by default', async (t) => {
   const dir = tempDir({ 'a.txt': 'x' });
   const ext = await new FakeExtension(bridge.base, { onChat: scripted(['DONE nothing to do']) }).connect();
   t.after(() => ext.disconnect());
 
   const { out } = await agent(dir);
   assert.equal(ext.created.length, 1, 'a conversation should be created for the run');
+  assert.equal(ext.created[0].temporary, true, 'a run should not land in chat history');
+  assert.equal(ext.chats.at(-1).conversationId, 'M5uhmgOBsPk0v4WN', 'the run must use the conversation it created');
+  assert.equal(ext.chats.at(-1).temporary, true);
+  assert.match(out, /\(new, temporary\)/);
+});
+
+test('--permanent keeps the run in the account\'s chat history', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x' });
+  const ext = await new FakeExtension(bridge.base, { onChat: scripted(['DONE nothing to do']) }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, ['--permanent']);
+  assert.equal(ext.created.length, 1);
+  assert.ok(!ext.created[0].temporary);
   const fresh = ext.created[0].requestId.replace(/-/g, '').slice(0, 16);
   assert.equal(ext.chats.at(-1).conversationId, fresh, 'the run must use the conversation it created');
   assert.match(out, /\(new\)/);
