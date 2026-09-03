@@ -94,6 +94,20 @@ your bridge on localhost.
 Built on Node with no runtime dependencies, plus an MV3 Chrome extension.
 `npm run dev:next` still starts the Next.js app that this repo was scaffolded from.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: check
+`git config user.email` before you commit, run `npm test`, and list every file
+you touched — including the incidental ones.
+
+## Credits
+
+- [**astrathezero**](https://github.com/astrathezero) — the headless Docker
+  deployment, image upload, and the offscreen keepalive that stops the service
+  worker being evicted with no tab open.
+- [**meatasit**](https://github.com/meatasit) — Windows path resolution in the
+  test harness, and the two CLI bugs it uncovered.
+
 ## License
 
 [MIT](LICENSE). Contributions are welcome and are taken under the same terms.
