@@ -14,6 +14,31 @@ let connected = false;
 let lastError = '';
 const jobTabs = new Map();
 
+// Helper to touch extension storage/state and prevent worker idle eviction
+function touchWorker() {
+  try {
+    chrome.storage.local.get('lastTouch').catch(() => {});
+  } catch {}
+}
+
+// ---------------------------------------------------- Offscreen Document Keepalive
+async function ensureOffscreenDocument() {
+  if (typeof chrome.offscreen === 'undefined') return;
+  try {
+    const hasDoc = await chrome.offscreen.hasDocument?.();
+    if (hasDoc) return;
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['BLOBS', 'MATCH_MEDIA'],
+      justification: 'Keep bridge SSE connection and background worker alive 24/7',
+    });
+  } catch (err) {
+    if (!err?.message?.includes('Only a single offscreen document may exist')) {
+      console.warn('[aipass-bg] Offscreen doc error:', err);
+    }
+  }
+}
+
 const bridgeUrl = async () => {
   try {
     const res = await chrome.storage.local.get('bridgeUrl');
@@ -24,6 +49,7 @@ const bridgeUrl = async () => {
 };
 
 async function post(path, body) {
+  touchWorker();
   try {
     await fetch(`${await bridgeUrl()}${path}`, {
       method: 'POST',
@@ -76,6 +102,7 @@ async function ensureContentScript(tab) {
 }
 
 async function handleJob(job) {
+  touchWorker();
   const tab = await findChatTab();
   if (!tab) {
     await post('/ext/error', { jobId: job.jobId, message: 'no de.aipass.net tab is open' });
@@ -95,6 +122,7 @@ async function handleJob(job) {
 }
 
 function handleEvent(name, data) {
+  touchWorker();
   if (name === 'job') handleJob(data);
   else if (name === 'abort') {
     const tabId = jobTabs.get(data.jobId);
@@ -116,6 +144,8 @@ async function connect() {
   const signal = controller.signal;
   const cycle = setTimeout(() => controller?.abort(), CYCLE_MS);
 
+  ensureOffscreenDocument();
+
   try {
     const res = await fetch(`${await bridgeUrl()}/ext/events`, {
       headers: { accept: 'text/event-stream' },
@@ -132,6 +162,7 @@ async function connect() {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      touchWorker();
       pending += decoder.decode(value, { stream: true });
 
       let cut;
@@ -145,7 +176,10 @@ async function connect() {
           if (line.startsWith('event:')) name = line.slice(6).trim();
           else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
         }
-        if (!dataLines.length) continue; // comment / keepalive
+        if (!dataLines.length) {
+          touchWorker();
+          continue; // comment / keepalive
+        }
         try { handleEvent(name, JSON.parse(dataLines.join('\n'))); } catch { /* ignore */ }
       }
     }
@@ -159,15 +193,27 @@ async function connect() {
   }
 }
 
-// A content script holds this port open so Chrome does not evict the worker.
+// Keep connection ports alive from content scripts and offscreen document
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'keepalive') return;
-  connect(); // a de.aipass.net tab just appeared (or the worker just woke)
-  port.onMessage.addListener(() => {});
-  port.onDisconnect.addListener(() => { void chrome.runtime.lastError; });
+  touchWorker();
+  if (port.name === 'keepalive' || port.name === 'offscreen-keepalive') {
+    connect();
+    port.onMessage.addListener(() => {
+      touchWorker();
+    });
+    port.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError;
+      ensureOffscreenDocument();
+    });
+  }
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  touchWorker();
+  if (msg?.type === 'offscreen-ping' || msg?.type === 'content-ping') {
+    sendResponse({ ok: true, awake: true, timestamp: Date.now() });
+    return true;
+  }
   if (msg?.type === 'from-page') {
     const p = msg.payload;
     if (p.kind === 'chunk') post('/ext/chunk', { jobId: p.jobId, parts: p.parts });
@@ -192,10 +238,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'reconnect') { controller?.abort(); connect(); sendResponse({ ok: true }); return true; }
 });
 
-// The worker can be evicted at any time; the alarm brings it back and the
-// connect() guard makes a duplicate call harmless.
+// Periodic alarms to ensure worker and offscreen document are active
 chrome.alarms.create('keepalive', { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener(() => connect());
-chrome.runtime.onStartup.addListener(() => connect());
-chrome.runtime.onInstalled.addListener(() => connect());
+chrome.alarms.onAlarm.addListener(() => {
+  touchWorker();
+  ensureOffscreenDocument();
+  connect();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureOffscreenDocument();
+  connect();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureOffscreenDocument();
+  connect();
+});
+
+// Initialize immediately
+ensureOffscreenDocument();
 connect();

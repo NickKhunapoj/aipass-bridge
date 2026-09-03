@@ -686,7 +686,7 @@ function extEvents(req, res) {
   warm(() => listModels({ force: true }), 500);
   warm(() => getQuota({ force: true }), 900);
 
-  const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
+  const ping = setInterval(() => res.write(': ping\n\n'), 10_000);
   req.on('close', () => {
     clearInterval(ping);
     extClients.delete(client);
