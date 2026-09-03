@@ -555,15 +555,21 @@ test('a generated music clip comes back as an audio link', async (t) => {
   assert.match(body.choices[0].message.content, /\[audio\.wav\]\(data:audio\/wav;base64,/);
 });
 
-test('media too large to inline comes back as a link that still resolves', async (t) => {
-  const url = 'https://de.aipass.net/api/media/abc123.mp4';
+// The shape a real generation returns: a signed storage.googleapis.com URL
+// whose path carries the extension and whose query carries the signature.
+const SIGNED = 'https://storage.googleapis.com/aip-prd-chat-bucket/music/2157/01a065ef.mp3'
+  + '?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Expires=21600&X-Goog-Signature=ad64c8ed';
+
+test('a signed storage link is labelled from its path, not its query', async (t) => {
   const ext = await new FakeExtension(bridge.base, {
-    onChat: async (_j, e) => { await e.media('video', url); await e.done(); },
+    onChat: async (_j, e) => { await e.media('audio', SIGNED); await e.done(); },
   }).connect();
   t.after(() => ext.disconnect());
 
-  const body = await (await post({ model: 'veo-3.1-fast-generate-001', messages: [{ role: 'user', content: 'a cat' }] })).json();
-  assert.match(body.choices[0].message.content, /\[video\]\(https:\/\/de\.aipass\.net\/api\/media\/abc123\.mp4\)/);
+  const body = await (await post({ model: 'lyria-3-clip-preview', messages: [{ role: 'user', content: 'lo-fi' }] })).json();
+  const content = body.choices[0].message.content;
+  assert.match(content, /\[audio\.mp3\]\(https:\/\/storage\.googleapis\.com\//);
+  assert.ok(content.includes('X-Goog-Signature=ad64c8ed'), 'the signature must survive intact or the link is dead');
 });
 
 test('a video model gets a longer silence allowance than a chat model', async (t) => {

@@ -167,10 +167,11 @@ async function drainPending() {
       const buf = Buffer.from(await res.arrayBuffer());
       stdout.write(writeMedia(buf, mime, kind));
     } catch (err) {
-      // The generators hand back same-origin URLs that need the session cookie,
-      // which this process does not have. Say so rather than failing silently.
-      stdout.write(`\n[${kind} could not be downloaded from ${url}: ${err.message}]\n` +
-        `[it may need a logged-in browser — open the link there]\n`);
+      // Generated media is a signed storage URL that anything can fetch, but
+      // only for a few hours. An old link in a resumed conversation is the
+      // likely cause, so say that rather than failing silently.
+      stdout.write(`\n[${kind} could not be downloaded from ${url.split('?')[0]}: ${err.message}]\n` +
+        `[the signed link may have expired — regenerate it]\n`);
     }
   }
 }
