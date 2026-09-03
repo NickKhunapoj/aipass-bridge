@@ -12,8 +12,7 @@ const CYCLE_MS = 4 * 60 * 1000; // reconnect before Chrome's long-request ceilin
 let controller = null;
 let connected = false;
 let lastError = '';
-// jobId -> { tabId, transient }. Folder setup uses a short-lived background
-// tab so resolving/creating the folder never navigates the user's active chat.
+// jobId -> { tabId }. Every request runs against the signed-in chat tab.
 const jobTabs = new Map();
 
 // The content script's keepalive port only exists while a de.aipass.net tab is
@@ -109,7 +108,6 @@ function waitForComplete(tabId, timeoutMs = 15_000) {
 async function releaseJobTab(jobId) {
   const record = jobTabs.get(jobId);
   jobTabs.delete(jobId);
-  if (record?.transient) await chrome.tabs.remove(record.tabId).catch(() => {});
   return record;
 }
 
@@ -131,17 +129,13 @@ async function ensureContentScript(tab) {
 }
 
 async function handleJob(job) {
-  const transient = job.kind === 'folder';
-  const tab = transient
-    ? await chrome.tabs.create({ url: 'https://de.aipass.net/chat', active: false })
-    : await findChatTab();
+  const tab = await findChatTab();
   if (!tab) {
     await post('/ext/error', { jobId: job.jobId, message: 'no de.aipass.net tab is open' });
     return;
   }
-  jobTabs.set(job.jobId, { tabId: tab.id, transient });
+  jobTabs.set(job.jobId, { tabId: tab.id });
   try {
-    if (transient) await waitForComplete(tab.id);
     await ensureContentScript(tab);
     await chrome.tabs.sendMessage(tab.id, { type: 'run', job });
   } catch (err) {

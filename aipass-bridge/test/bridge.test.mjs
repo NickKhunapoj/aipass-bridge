@@ -32,6 +32,17 @@ test('refuses a request with no extension attached', async () => {
   assert.match(body.error.message, /no extension connected/);
 });
 
+test('readiness requires an extension while liveness does not', async () => {
+  const live = await fetch(`${bridge.base}/health`);
+  assert.equal(live.status, 200);
+  const ready = await fetch(`${bridge.base}/ready`);
+  assert.equal(ready.status, 503);
+  const body = await ready.json();
+  assert.equal(body.reason, 'no extension connected');
+  assert.equal(body.oldestJobAgeMs, 0);
+  assert.equal(body.oldestJobIdleMs, 0);
+});
+
 test('streams text, tool status and a finish reason', async () => {
   const ext = await new FakeExtension(bridge.base, {
     onChat: async (_job, e) => {
@@ -296,7 +307,7 @@ test('passes an assistant id and field through to the create call', async (t) =>
   assert.equal(ext.created.at(-1).assistantField, 'aiAssistantId', 'default field name until a capture confirms it');
 });
 
-test('creates a conversation in the bridge folder but does not reuse it for API calls', async (t) => {
+test('creates a permanent conversation explicitly without changing API isolation', async (t) => {
   const ext = await new FakeExtension(bridge.base).connect();
   t.after(() => ext.disconnect());
 
@@ -320,124 +331,33 @@ test('creates a conversation in the bridge folder but does not reuse it for API 
   assert.equal(ext.created.length, 2, 'one new conversation was created for the API call');
 });
 
-test('creates one fresh conversation per API call inside AIPass-Bridge', async (t) => {
+test('creates one fresh temporary conversation per API call', async (t) => {
   const isolated = await startBridge();
   t.after(() => isolated.stop());
   const ext = await new FakeExtension(isolated.base, {
-    folders: [{ id: 'folder-aipass-bridge', name: 'AIPass-Bridge' }],
     onChat: async (_job, e) => { await e.text('ok'); await e.done(); },
   }).connect();
   t.after(() => ext.disconnect());
-  const ask = (content) => fetch(`${isolated.base}/v1/chat/completions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'user', content }] }),
-  });
 
-  await ask('first');
-  await ask('second');
-  assert.equal(ext.createdFolders.length, 0, 'the existing folder is reused');
-  assert.equal(ext.created.length, 2, 'one conversation is created for each API call');
+  for (const content of ['first', 'second']) {
+    const response = await fetch(`${isolated.base}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content }] }),
+    });
+    assert.equal(response.status, 200);
+  }
+
+  assert.equal(ext.created.length, 2, 'each API call creates one temporary chat');
   assert.notEqual(ext.created[0].requestId, ext.created[1].requestId);
-  assert.ok(ext.created.every((job) => job.folderId === 'folder-aipass-bridge'));
-  assert.deepEqual(ext.chats.map((job) => job.conversationId), ext.created.map((job) => job.requestId.replace(/-/g, '').slice(0, 16)));
-});
-
-test('creates the AIPass-Bridge folder once when it is absent', async (t) => {
-  const isolated = await startBridge();
-  t.after(() => isolated.stop());
-  const ext = await new FakeExtension(isolated.base).connect();
-  t.after(() => ext.disconnect());
-
-  await fetch(`${isolated.base}/v1/chat/completions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'user', content: 'first' }] }),
-  });
-  await fetch(`${isolated.base}/v1/chat/completions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'user', content: 'second' }] }),
-  });
-  assert.equal(ext.createdFolders.length, 1);
-  assert.equal(ext.createdFolders[0].name, 'AIPass-Bridge');
-  assert.equal(ext.created.length, 2);
-  assert.ok(ext.created.every((job) => job.folderId.startsWith('folder-')));
-});
-
-test('recreates AIPass-Bridge when its cached folder was deleted', async (t) => {
-  const staleFolderId = 'deleted-folder';
-  const isolated = await startBridge({ AIPASS_FOLDER_ID: staleFolderId });
-  t.after(() => isolated.stop());
-  const ext = await new FakeExtension(isolated.base, {
-    rejectedFolderIds: [staleFolderId],
-    onChat: async (_job, e) => { await e.text('ok'); await e.done(); },
-  }).connect();
-  t.after(() => ext.disconnect());
-
-  const response = await fetch(`${isolated.base}/v1/chat/completions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'user', content: 'first' }] }),
-  });
-
-  assert.equal(response.status, 200);
-  assert.equal(ext.created.length, 2, 'the rejected create is retried exactly once');
-  assert.equal(ext.created[0].folderId, staleFolderId);
-  assert.notEqual(ext.created[1].folderId, staleFolderId);
-  assert.equal(ext.createdFolders.length, 1, 'the missing named folder is recreated');
-  assert.equal(ext.createdFolders[0].name, 'AIPass-Bridge');
-  assert.equal(ext.chats.length, 1, 'the prompt is sent only after folder recovery');
-  assert.equal(ext.chats[0].conversationId, ext.created[1].requestId.replace(/-/g, '').slice(0, 16));
-
-  const status = await (await fetch(`${isolated.base}/status`)).json();
-  assert.equal(status.folder.id, ext.created[1].folderId, 'the replacement folder is cached');
-});
-
-test('a failed folder action never falls back to an unfiled conversation', async (t) => {
-  const isolated = await startBridge();
-  t.after(() => isolated.stop());
-  const ext = await new FakeExtension(isolated.base, {
-    folderError: 'aipass returned 400 Bad Request',
-    onChat: async (_job, e) => { await e.text('ok'); await e.done(); },
-  }).connect();
-  t.after(() => ext.disconnect());
-
-  const response = await fetch(`${isolated.base}/v1/chat/completions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'user', content: 'first' }] }),
-  });
-  const body = await response.json();
-  assert.equal(response.status, 502);
-  assert.match(body.error.message, /400 Bad Request/);
-  assert.equal(ext.created.length, 0, 'the chat conversation is not created outside the folder');
-});
-
-test('accepts a visible AiPASS folder URL as the runtime folder binding', async (t) => {
-  const isolated = await startBridge();
-  t.after(() => isolated.stop());
-  const folderId = '00000000-0000-4000-8000-000000000001';
-  const ext = await new FakeExtension(isolated.base, {
-    onChat: async (_job, e) => { await e.text('ok'); await e.done(); },
-  }).connect();
-  t.after(() => ext.disconnect());
-
-  const configured = await fetch(`${isolated.base}/config`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ folderUrl: `https://de.aipass.net/chat?folderId=${folderId}` }),
-  }).then((response) => response.json());
-  assert.equal(configured.folder.id, folderId);
-
-  const response = await fetch(`${isolated.base}/v1/chat/completions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'user', content: 'first' }] }),
-  });
-  assert.equal(response.status, 200);
-  assert.equal(ext.createdFolders.length, 0, 'the configured folder does not need discovery');
-  assert.equal(ext.created[0].folderId, folderId);
+  assert.ok(ext.created.every((job) => job.temporary));
+  assert.ok(ext.chats.every((job) => job.temporary));
+  assert.deepEqual(ext.chats.map((job) => job.conversationId), ext.created.map((job) => 'M5uhmgOBsPk0v4WN'));
 });
 
 test('returns an actionable error when the client-side AiPASS session is rejected', async (t) => {
   const isolated = await startBridge();
   t.after(() => isolated.stop());
   const ext = await new FakeExtension(isolated.base, {
-    folders: [{ id: 'folder-aipass-bridge', name: 'AIPass-Bridge' }],
     onChat: async (_job, e) => e.error('AIPASS_AUTH_REQUIRED: the open AiPASS chat page is not signed in or its session expired. Open https://de.aipass.net/chat in the browser, sign in there, and retry. aipass returned 403 Forbidden'),
   }).connect();
   t.after(() => ext.disconnect());
@@ -450,6 +370,30 @@ test('returns an actionable error when the client-side AiPASS session is rejecte
   assert.equal(response.status, 502);
   assert.match(body.error.message, /AIPASS_AUTH_REQUIRED/);
   assert.match(body.error.message, /Open https:\/\/de\.aipass\.net\/chat/);
+  const status = await fetch(`${isolated.base}/status`).then((res) => res.json());
+  assert.equal(status.apiRequests, 1);
+  assert.equal(status.authFailures, 1);
+  assert.equal(status.upstreamFailures, 0);
+});
+
+test('records an AiPASS connectivity failure without exposing request content', async (t) => {
+  const isolated = await startBridge();
+  t.after(() => isolated.stop());
+  const ext = await new FakeExtension(isolated.base, {
+    onChat: async (_job, e) => e.error('AIPASS_UNREACHABLE: could not reach de.aipass.net — Failed to fetch'),
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const response = await fetch(`${isolated.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'private prompt' }] }),
+  });
+  assert.equal(response.status, 502);
+  const status = await fetch(`${isolated.base}/status`).then((res) => res.json());
+  assert.equal(status.apiRequests, 1);
+  assert.equal(status.upstreamFailures, 1);
+  assert.equal(status.authFailures, 0);
+  assert.doesNotMatch(JSON.stringify(status), /private prompt/, 'status must not include prompt content');
 });
 
 /* ------------------------------------------------------------- hardening */
@@ -574,7 +518,7 @@ test('a normal conversation is not marked temporary', async (t) => {
   })).json();
 
   assert.ok(!ext.created.at(-1).temporary);
-  await post({ messages: [{ role: 'user', content: 'hi' }] });
+  await post({ aipass_reuse_conversation: true, messages: [{ role: 'user', content: 'hi' }] });
   assert.ok(!ext.chats.at(-1).temporary);
 });
 

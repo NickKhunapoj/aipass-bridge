@@ -31,9 +31,14 @@ ENV DISPLAY=:99 \
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY start-browser.sh /app/start-browser.sh
 COPY start-vnc.sh /app/start-vnc.sh
+COPY healthcheck.sh /app/healthcheck.sh
+COPY watchdog.sh /app/watchdog.sh
 # Docker Desktop can send Windows CRLF files in the build context. Normalize
 # these Linux entry scripts inside the image before Supervisor executes them.
-RUN sed -i 's/\r$//' /app/start-browser.sh /app/start-vnc.sh \
-    && chmod +x /app/start-browser.sh /app/start-vnc.sh
+RUN sed -i 's/\r$//' /app/start-browser.sh /app/start-vnc.sh /app/healthcheck.sh /app/watchdog.sh \
+    && chmod +x /app/start-browser.sh /app/start-vnc.sh /app/healthcheck.sh /app/watchdog.sh
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD /app/healthcheck.sh
 
 CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

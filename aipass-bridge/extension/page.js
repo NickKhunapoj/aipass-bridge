@@ -7,7 +7,7 @@
   // injection claims a higher generation; older copies stand down.
   const GEN = (window.__aipassBridgeGen ?? 0) + 1;
   window.__aipassBridgeGen = GEN;
-  window.__aipassBridgeVersion = '0.2.2-folder-dialog';
+  window.__aipassBridgeVersion = '0.2.3-temporary-api';
 
   const TAG = '__aipass_bridge';
   const inflight = new Map();
@@ -72,12 +72,24 @@
       `${bytes ? ` [${bytes} bytes]` : ''}${forensics ? ` {${forensics}}` : ''}` +
       `${responseBody ? ` — ${responseBody}` : ''}`;
 
+    if (res.status >= 500) return `AIPASS_UNREACHABLE: ${upstream}`;
     if (res.status !== 401 && res.status !== 403) return upstream;
     const signedIn = await authorizedChatPage();
     return `AIPASS_AUTH_REQUIRED: ${signedIn
       ? 'the open AiPASS chat page is signed in, but AiPASS denied this action'
       : 'the open AiPASS chat page is not signed in or its session expired'}. ` +
       `Open https://de.aipass.net/chat in the browser, sign in there, and retry. ${upstream}`;
+  }
+
+  // Network failures have no HTTP response to classify. Tag them before they
+  // leave the page so the bridge can alert separately from an expired login.
+  function bridgeError(err) {
+    const message = String(err?.message ?? err);
+    if (message.startsWith('AIPASS_AUTH_REQUIRED:') || message.startsWith('AIPASS_UNREACHABLE:')) return message;
+    if (err?.name === 'TypeError' || /(?:failed to fetch|network(?:error)?|load failed)/i.test(message)) {
+      return `AIPASS_UNREACHABLE: could not reach de.aipass.net — ${message}`;
+    }
+    return message;
   }
 
   // Read-only GET against one of the app's own loaders. Confined to /loaders/
@@ -91,7 +103,7 @@
       if (!res.ok) throw new Error(await responseError(res));
       reply({ jobId: job.jobId, kind: 'loader', raw: await res.text() });
     } catch (err) {
-      reply({ jobId: job.jobId, kind: 'loader', message: String(err?.message ?? err) });
+      reply({ jobId: job.jobId, kind: 'loader', message: bridgeError(err) });
     }
   }
 
@@ -107,7 +119,6 @@
         ? new URLSearchParams({ intent: 'create-temporary-chat' })
         : new URLSearchParams({
             message: job.message,
-            folderId: job.folderId || '',
             modelId: job.modelId,
             intent: 'create-conversation',
             clientCreateRequestId: job.requestId,
@@ -124,99 +135,7 @@
       if (!res.ok) throw new Error(await responseError(res));
       reply({ jobId: job.jobId, kind: 'loader', raw: await res.text() });
     } catch (err) {
-      reply({ jobId: job.jobId, kind: 'loader', message: String(err?.message ?? err) });
-    }
-  }
-
-  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  async function waitUntil(check, { timeout = 12_000, every = 80 } = {}) {
-    const deadline = Date.now() + timeout;
-    for (;;) {
-      const value = check();
-      if (value) return value;
-      if (Date.now() >= deadline) throw new Error('timed out waiting for the AiPASS folder UI');
-      await delay(every);
-    }
-  }
-
-  const visible = (element) => Boolean(element?.getClientRects().length);
-  const controls = () => [...document.querySelectorAll('button, a')].filter(visible);
-  const exactControl = (text) => controls().find((element) => element.textContent.trim() === text);
-  const folderIdInLocation = () => window.location.pathname.match(/^\/folder\/([0-9a-f-]{36})\/?$/i)?.[1] ?? '';
-
-  function folderNavigation() {
-    return controls().find((element) => element.getAttribute('href') === '/folder')
-      ?? controls().find((element) => /^(folders?|โฟลเดอร์)$/i.test(element.textContent.trim()));
-  }
-
-  function createFolderControl() {
-    return controls().find((element) => /^(create folder|สร้างโฟลเดอร์)$/i.test(element.textContent.trim()));
-  }
-
-  function folderNameInput() {
-    return [...document.querySelectorAll('input')].find((element) => visible(element) && /^(name|ชื่อ)$/i.test(element.getAttribute('placeholder') ?? ''));
-  }
-
-  function confirmFolderControl() {
-    const dialog = [...document.querySelectorAll('[role="dialog"]')].find(visible);
-    if (!dialog) return null;
-    return [...dialog.querySelectorAll('button')].find((element) =>
-      visible(element) && !element.disabled && /^(confirm|create|ยืนยัน|สร้าง)$/i.test(element.textContent.trim()));
-  }
-
-  function setInputValue(input, value) {
-    // React tracks the native property setter; assigning input.value alone
-    // does not enable the form's submit action in its controlled component.
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-    setter?.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  // Folder management goes through the visible first-party UI, not a guessed
-  // data endpoint. That lets the site create its own folder and gives us the
-  // id from the same /folder/<id> route a user sees after selecting it.
-  async function runFolder(job) {
-    try {
-      if (!await authorizedChatPage()) {
-        throw new Error('AIPASS_AUTH_REQUIRED: the open AiPASS chat page is not signed in or its session expired. Open https://de.aipass.net/chat in the browser, sign in there, and retry.');
-      }
-
-      let folder = exactControl(job.name);
-      if (!folder) {
-        folderNavigation()?.click();
-        await waitUntil(() => exactControl(job.name) || createFolderControl() || folderNameInput());
-        folder = exactControl(job.name);
-      }
-      if (!folder) {
-        createFolderControl()?.click();
-        const input = await waitUntil(folderNameInput);
-        setInputValue(input, job.name);
-        // AiPASS now opens a confirmation dialog whose submit button is not
-        // necessarily associated with the input's form. Click the visible
-        // enabled control explicitly instead of relying on Enter/requestSubmit.
-        (await waitUntil(confirmFolderControl)).click();
-
-        // A successful create can navigate directly to /folder/<id> without
-        // first rendering a selectable folder label. Accept either outcome.
-        const created = await waitUntil(() => {
-          const folderId = folderIdInLocation();
-          if (folderId) return { folderId };
-          const control = exactControl(job.name);
-          return control ? { control } : null;
-        });
-        if (created.folderId) {
-          reply({ jobId: job.jobId, kind: 'loader', raw: JSON.stringify({ folderId: created.folderId, name: job.name }) });
-          return;
-        }
-        folder = created.control;
-      }
-      folder.click();
-      const folderId = await waitUntil(folderIdInLocation);
-      reply({ jobId: job.jobId, kind: 'loader', raw: JSON.stringify({ folderId, name: job.name }) });
-    } catch (err) {
-      reply({ jobId: job.jobId, kind: 'loader', message: String(err?.message ?? err) });
+      reply({ jobId: job.jobId, kind: 'loader', message: bridgeError(err) });
     }
   }
 
@@ -509,7 +428,7 @@
     } catch (err) {
       flush();
       if (err?.name === 'AbortError') reply({ jobId: job.jobId, kind: 'done', finishReason: 'stop' });
-      else reply({ jobId: job.jobId, kind: 'error', message: String(err?.message ?? err) });
+      else reply({ jobId: job.jobId, kind: 'error', message: bridgeError(err) });
     } finally {
       clearInterval(ticker);
       inflight.delete(job.jobId);
@@ -522,7 +441,7 @@
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg[TAG] === 'req') {
-      const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'create' ? runCreate : msg.job.kind === 'folder' ? runFolder : run;
+      const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'create' ? runCreate : run;
       fn(msg.job);
     }
     else if (msg[TAG] === 'abort') inflight.get(msg.jobId)?.abort();

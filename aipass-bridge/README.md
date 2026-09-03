@@ -679,12 +679,14 @@ decimals is a pool of 10,000 — the bridge does that division for you.
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `text` or `off` |
 | `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
 | `AIPASS_PER_REQUEST_CONVERSATIONS` | `1` | `0` restores legacy shared-conversation behavior |
-| `AIPASS_FOLDER_NAME` | `AIPass-Bridge` | folder created/reused for new API conversations |
-| `AIPASS_FOLDER_ID` | *(unset)* | use this existing AiPASS folder id without discovery |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
 | `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin to call the bridge — see below |
 | `AIPASS_ALLOWED_HOSTS` | *(unset)* | extra hostnames accepted in the `Host` header |
 | `AIPASS_ADMIN` | *(unset)* | `1` enables the container-management routes |
+
+The optional Docker deployment adds `/ready` (a `503` until an extension is
+attached), a Docker healthcheck, a staged browser/extension watchdog, and an
+optional Slack-compatible alert webhook. See [`deploy/`](deploy/README.md).
 
 ### Why the bridge is closed by default
 
@@ -705,18 +707,12 @@ account's credits. So it refuses to be reachable from a web page:
 
 The bridge also serves `POST /v1/chat/completions` and `GET /v1/models`, so any
 OpenAI-compatible client can point at `http://127.0.0.1:8787/v1` for plain
-chat. By default each Chat Completions request creates one new AiPASS
-conversation inside the `AIPass-Bridge` folder, then sends only that request's
-latest user message. This keeps API calls isolated, like direct vendor API
-calls, and keeps the AiPASS sidebar tidy. With no `AIPASS_FOLDER_ID` set, the
-extension resolves the folder by its configured name in the visible, signed-in
-AiPASS UI; if it is absent, the UI creates it and returns its account-specific
-id. The id remains in memory only for that bridge process. If folder setup
-fails, the request fails rather than silently creating an unfiled chat.
-
-`AIPASS_FOLDER_ID` and `POST /config` with `folderId` or `folderUrl` are
-optional deployment overrides for a pre-provisioned account. They are never
-needed for the usual per-user setup and should not be put in source control.
+chat. By default every Chat Completions request creates one fresh AiPASS
+temporary chat (`intent=create-temporary-chat`), sends only that request's
+latest user message, and repeats the temporary flag on the response turn.
+Temporary chats do not enter the AiPASS sidebar, so API calls stay isolated
+without creating or resolving folders. Set `AIPASS_PER_REQUEST_CONVERSATIONS=0`
+only if you need the legacy shared-conversation behavior.
 
 AiPASS requests are never sent by the local Node process: the extension injects
 them into the already-open `https://de.aipass.net/chat` page with

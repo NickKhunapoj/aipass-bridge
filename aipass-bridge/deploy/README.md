@@ -52,6 +52,56 @@ Then:
 ./test.sh                     # bridge status → extension connected → models → one chat
 ```
 
+## Health, recovery, and alerts
+
+Docker reports the container as `healthy` only when the bridge is responding
+**and** at least one extension is attached. Check it without sending a model
+request:
+
+```bash
+docker compose ps
+curl -fsS http://127.0.0.1:8787/ready
+```
+
+`/health` is a liveness endpoint: it is `200` whenever the Node process can
+answer HTTP. `/ready` is the stricter readiness endpoint used by Docker; it
+returns `503` until Chrome's extension connects. `/status` also exposes
+`oldestJobAgeMs` and `oldestJobIdleMs` for monitoring without exposing request
+contents.
+
+Supervisor runs a watchdog every 30 seconds. It logs and optionally alerts on
+a dead bridge, no attached extension, or a job that has been silent for too
+long. Recovery is rate-limited and escalates from reloading the extension/tab
+to restarting Chromium. It does not restart the container merely because a
+login expired, so the browser profile and noVNC desktop remain available for
+you to sign in again.
+
+The watchdog also posts an info event for each accepted API request (never its
+prompt or response), an alert when AiPASS rejects authentication, and an alert
+when the browser cannot reach AiPASS or it returns a server error. These totals
+and timestamps are visible on `/status` as `apiRequests`, `authFailures`, and
+`upstreamFailures`.
+
+To receive alerts, set `AIPASS_ALERT_WEBHOOK_URL` in `.env`. Discord webhook
+URLs automatically receive a native rich card with severity color, icon,
+timestamp, and service context; a previously configured `/slack` suffix is
+handled too. Other Slack-compatible endpoints receive concise text. The URL is
+optional; blank means local logs only. The watchdog sends info on startup and
+recovery, warnings when it takes a recovery action, and alerts for failures;
+it never posts on every poll. Set `AIPASS_ALERT_INCLUDE_INFO=0` to receive only
+warnings and alerts. The supplied settings are conservative:
+
+| setting | default | purpose |
+|---|---:|---|
+| `AIPASS_WATCHDOG_INTERVAL_SECONDS` | 30 | time between checks |
+| `AIPASS_WATCHDOG_STUCK_JOB_MS` | 960000 | silence before a job is treated as stuck (16 min) |
+| `AIPASS_ALERT_COOLDOWN_SECONDS` | 900 | repeat-alert suppression window |
+| `AIPASS_ALERT_INCLUDE_INFO` | 1 | send startup and recovery events to the webhook |
+
+For an external monitor, alert on a failed `/ready` request or Docker changing
+to `unhealthy`. Do not use `test.sh` as a frequent probe: it deliberately
+sends a chat completion.
+
 The bridge is now on the server's `127.0.0.1:8787`. Point any OpenAI-compatible
 client at `http://127.0.0.1:8787/v1` (tunnel `8787` the same way to reach it
 from your laptop), or run the agent on the server itself.

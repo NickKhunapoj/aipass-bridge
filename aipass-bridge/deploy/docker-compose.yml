@@ -33,4 +33,11 @@ services:
       # proxy, say) needs that name listed here — it is refused otherwise.
       - AIPASS_ALLOWED_HOSTS=${AIPASS_ALLOWED_HOSTS:-}
       - noVNC_PASSWORD=${noVNC_PASSWORD:-}
+      # Discord gets native rich status cards; other endpoints get text. The
+      # bridge itself remains loopback-only.
+      - AIPASS_ALERT_WEBHOOK_URL=${AIPASS_ALERT_WEBHOOK_URL:-}
+      - AIPASS_ALERT_INCLUDE_INFO=${AIPASS_ALERT_INCLUDE_INFO:-1}
+      - AIPASS_ALERT_COOLDOWN_SECONDS=${AIPASS_ALERT_COOLDOWN_SECONDS:-900}
+      - AIPASS_WATCHDOG_INTERVAL_SECONDS=${AIPASS_WATCHDOG_INTERVAL_SECONDS:-30}
+      - AIPASS_WATCHDOG_STUCK_JOB_MS=${AIPASS_WATCHDOG_STUCK_JOB_MS:-960000}
     shm_size: '2gb'
