@@ -7,6 +7,7 @@ BASE_URL="http://127.0.0.1:8787"
 INTERVAL_SECONDS="${AIPASS_WATCHDOG_INTERVAL_SECONDS:-30}"
 STUCK_JOB_MS="${AIPASS_WATCHDOG_STUCK_JOB_MS:-960000}"
 ALERT_COOLDOWN_SECONDS="${AIPASS_ALERT_COOLDOWN_SECONDS:-900}"
+USAGE_REPORT_SECONDS=3600
 WEBHOOK_URL="${AIPASS_ALERT_WEBHOOK_URL:-}"
 INCLUDE_INFO="${AIPASS_ALERT_INCLUDE_INFO:-1}"
 
@@ -17,6 +18,8 @@ last_remote_at=0
 last_browser_restart_at=0
 last_bridge_restart_at=0
 seen_api_requests=-1
+last_reported_api_requests=-1
+last_api_report_at=0
 seen_auth_failures=-1
 seen_upstream_failures=-1
 
@@ -96,18 +99,31 @@ restart_bridge_if_due() {
 }
 
 report_bridge_events() {
-  local api_requests="$1" auth_failures="$2" upstream_failures="$3" new_requests
+  local api_requests="$1" api_requests_last_hour="$2" auth_failures="$3" upstream_failures="$4" at
   # The first snapshot establishes a baseline. Afterwards every accepted API
-  # request and every classified AiPASS failure becomes a local/webhook event.
+  # request contributes to an hourly summary. A quiet hour emits nothing.
   if [ "$seen_api_requests" -lt 0 ]; then
     seen_api_requests="$api_requests"
+    last_reported_api_requests="$api_requests"
     seen_auth_failures="$auth_failures"
     seen_upstream_failures="$upstream_failures"
     return 0
   fi
-  if [ "$api_requests" -gt "$seen_api_requests" ]; then
-    new_requests=$((api_requests - seen_api_requests))
-    emit info "API request received" "Received ${new_requests} API request(s); ${api_requests} accepted since the bridge started." "api_request_${api_requests}"
+
+  # The bridge counter resets with the bridge process. Start a fresh reporting
+  # window instead of waiting for the new process to exceed the old total.
+  if [ "$api_requests" -lt "$seen_api_requests" ]; then
+    last_reported_api_requests="$api_requests"
+    last_api_report_at=0
+  fi
+
+  if [ "$api_requests" -gt "$last_reported_api_requests" ]; then
+    at=$(now)
+    if [ "$last_api_report_at" -eq 0 ] || [ $((at - last_api_report_at)) -ge "$USAGE_REPORT_SECONDS" ]; then
+      emit info "API request received" "Usage in the last hour: ${api_requests_last_hour} request(s). Cumulative usage since bridge startup: ${api_requests} request(s)." "api_usage"
+      last_reported_api_requests="$api_requests"
+      last_api_report_at=$at
+    fi
   fi
   if [ "$auth_failures" -gt "$seen_auth_failures" ]; then
     emit alert "AiPASS authentication required" "AiPASS rejected a request. Open noVNC, sign in or refresh the AiPASS chat tab, then retry." "aipass_auth_required"
@@ -138,14 +154,14 @@ while true; do
     continue
   fi
 
-  read -r extensions active_jobs oldest_idle_ms api_requests auth_failures upstream_failures < <(STATUS_JSON="$status" node -e '
+  read -r extensions active_jobs oldest_idle_ms api_requests api_requests_last_hour auth_failures upstream_failures < <(STATUS_JSON="$status" node -e '
     try {
       const s = JSON.parse(process.env.STATUS_JSON);
-      console.log([Number(s.extensions) || 0, Number(s.activeJobs) || 0, Number(s.oldestJobIdleMs) || 0, Number(s.apiRequests) || 0, Number(s.authFailures) || 0, Number(s.upstreamFailures) || 0].join(" "));
-    } catch { console.log("0 0 0 0 0 0"); }
+      console.log([Number(s.extensions) || 0, Number(s.activeJobs) || 0, Number(s.oldestJobIdleMs) || 0, Number(s.apiRequests) || 0, Number(s.apiRequestsLastHour) || 0, Number(s.authFailures) || 0, Number(s.upstreamFailures) || 0].join(" "));
+    } catch { console.log("0 0 0 0 0 0 0"); }
   ')
 
-  report_bridge_events "$api_requests" "$auth_failures" "$upstream_failures"
+  report_bridge_events "$api_requests" "$api_requests_last_hour" "$auth_failures" "$upstream_failures"
 
   if [ "$extensions" -lt 1 ]; then
     if [ "$last_state" != "extension_disconnected" ]; then

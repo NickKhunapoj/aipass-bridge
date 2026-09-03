@@ -32,6 +32,23 @@ test('refuses a request with no extension attached', async () => {
   assert.match(body.error.message, /no extension connected/);
 });
 
+test('requires a configured API key for client routes but not health probes', async (t) => {
+  const secured = await startBridge({ AIPASS_API_KEY: 'test-private-key' });
+  t.after(() => secured.stop());
+  const unauthorized = await fetch(`${secured.base}/v1/models`);
+  assert.equal(unauthorized.status, 401);
+  assert.equal((await unauthorized.json()).error.type, 'authentication_error');
+
+  const wrong = await fetch(`${secured.base}/v1/models`, { headers: { authorization: 'Bearer wrong-key' } });
+  assert.equal(wrong.status, 401);
+  const authorized = await fetch(`${secured.base}/v1/models`, { headers: { authorization: 'Bearer test-private-key' } });
+  assert.equal(authorized.status, 200);
+  const alternativeHeader = await fetch(`${secured.base}/v1/models`, { headers: { 'x-api-key': 'test-private-key' } });
+  assert.equal(alternativeHeader.status, 200);
+  assert.equal((await fetch(`${secured.base}/ready`)).status, 503, 'readiness is available to Docker without an API key');
+  assert.equal((await fetch(`${secured.base}/status`)).status, 200, 'status is available to monitoring without an API key');
+});
+
 test('readiness requires an extension while liveness does not', async () => {
   const live = await fetch(`${bridge.base}/health`);
   assert.equal(live.status, 200);
@@ -61,6 +78,30 @@ test('streams text, tool status and a finish reason', async () => {
   assert.equal(out.finish, 'stop');
   assert.ok(out.done);
   await ext.disconnect();
+});
+
+test('serves concurrent API requests through one ready extension worker', async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const received = [];
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      received.push({ job, e });
+      if (received.length === 3) release();
+      await gate;
+      await e.text(job.text);
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const requests = ['one', 'two', 'three'].map((content) => post({ stream: false, messages: [{ role: 'user', content }] }));
+  await waitFor(() => received.length === 3);
+  const responses = await Promise.all(requests);
+  assert.deepEqual(await Promise.all(responses.map(async (res) => (await res.json()).choices[0].message.content)), ['one', 'two', 'three']);
+  const status = await fetch(`${bridge.base}/status`).then((res) => res.json());
+  assert.equal(status.extensionCapacity, 4);
+  assert.equal(status.queuedJobs, 0);
 });
 
 test('forwards only the newest user message, never an assistant turn', async () => {
@@ -372,6 +413,7 @@ test('returns an actionable error when the client-side AiPASS session is rejecte
   assert.match(body.error.message, /Open https:\/\/de\.aipass\.net\/chat/);
   const status = await fetch(`${isolated.base}/status`).then((res) => res.json());
   assert.equal(status.apiRequests, 1);
+  assert.equal(status.apiRequestsLastHour, 1);
   assert.equal(status.authFailures, 1);
   assert.equal(status.upstreamFailures, 0);
 });

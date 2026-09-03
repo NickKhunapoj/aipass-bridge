@@ -8,7 +8,7 @@
 // back. The server owns the conversation and its history, exactly as it does
 // for the web UI, so there is nothing to reconstruct on this side.
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createLogger } from './logger.mjs';
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
@@ -26,6 +26,8 @@ const IDLE_TIMEOUT_MS = Number(process.env.AIPASS_IDLE_TIMEOUT_MS ?? 180_000);
 // here and would kill a generation that was going to succeed — and the credits
 // are already spent by then.
 const MEDIA_TIMEOUT_MS = Number(process.env.AIPASS_MEDIA_TIMEOUT_MS ?? 900_000);
+const EXTENSION_CONCURRENCY = Math.max(1, Number(process.env.AIPASS_EXTENSION_CONCURRENCY ?? 4) || 4);
+const EXTENSION_STALE_MS = 45_000;
 const MAX_BODY = 8 * 1024 * 1024;
 
 let defaultModel = process.env.AIPASS_MODEL ?? 'gemini-3.1-flash-lite';
@@ -47,6 +49,7 @@ const ASSISTANT_FIELD = process.env.AIPASS_ASSISTANT_FIELD ?? 'aiAssistantId';
 // call the bridge. Admin/deployment routes stay off unless AIPASS_ADMIN=1.
 const CORS_ORIGIN = process.env.AIPASS_CORS_ORIGIN ?? '';
 const ADMIN = process.env.AIPASS_ADMIN === '1';
+const API_KEY = process.env.AIPASS_API_KEY ?? '';
 const ALLOWED_HOSTS = new Set([
   '127.0.0.1', 'localhost', '::1', '[::1]',
   ...(process.env.AIPASS_ALLOWED_HOSTS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
@@ -64,6 +67,24 @@ const corsHeaders = () => (CORS_ORIGIN
   ? { 'access-control-allow-origin': CORS_ORIGIN, 'access-control-allow-private-network': 'true' }
   : {});
 
+// OpenAI clients conventionally send Authorization: Bearer <api-key>. Accept
+// X-API-Key as well for simpler health/automation clients. A fixed-length,
+// timing-safe comparison avoids leaking partial key matches.
+function apiAuthorized(req) {
+  if (!API_KEY) return true;
+  const authorization = String(req.headers.authorization ?? '');
+  const candidate = authorization.match(/^Bearer\s+(.+)$/i)?.[1] ?? String(req.headers['x-api-key'] ?? '');
+  const expected = Buffer.from(API_KEY);
+  const received = Buffer.from(candidate);
+  return received.length === expected.length && timingSafeEqual(received, expected);
+}
+
+// The extension cannot safely carry the bridge API key into the page context.
+// These endpoints are only usable on loopback and are intentionally separate
+// from the client-facing API surface. Liveness/readiness also stay keyless for
+// Docker health checks and external monitors.
+const keyExemptPath = (path) => path === '/status' || path === '/health' || path === '/ready' || path.startsWith('/ext/');
+
 const logger = createLogger();
 
 // Monitoring metadata deliberately contains no prompt, response, cookie, or
@@ -71,10 +92,17 @@ const logger = createLogger();
 // report meaningful operational events without observing user content.
 let apiRequestCount = 0;
 let lastApiRequestAt = null;
+const apiRequestTimes = [];
 let authFailureCount = 0;
 let lastAuthFailureAt = null;
 let upstreamFailureCount = 0;
 let lastUpstreamFailureAt = null;
+
+function apiRequestsLastHour(at = Date.now()) {
+  const cutoff = at - 60 * 60 * 1000;
+  while (apiRequestTimes.length && apiRequestTimes[0] <= cutoff) apiRequestTimes.shift();
+  return apiRequestTimes.length;
+}
 
 /* ------------------------------------------------- react-router turbo-stream */
 
@@ -176,15 +204,56 @@ function extractModels(decoded) {
 
 const jobs = new Map();
 const extClients = new Set();
-let rr = 0;
+const pendingJobs = new Set();
 
-const pickClient = () => {
-  const list = [...extClients];
-  return list.length ? list[rr++ % list.length] : null;
+const readyClients = () => {
+  const cutoff = Date.now() - EXTENSION_STALE_MS;
+  return [...extClients].filter((client) => client.ready && client.lastSeenAt >= cutoff);
 };
 
-const sendToClient = (client, event, data) =>
-  client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+// Prefer the least-busy ready worker. Each extension can run several isolated
+// temporary conversations at once, but we cap that fan-out so one browser tab
+// is not overwhelmed when several API clients arrive together.
+const pickClient = () => readyClients()
+  .filter((client) => client.jobs.size < EXTENSION_CONCURRENCY)
+  .sort((a, b) => a.jobs.size - b.jobs.size || a.lastAssignedAt - b.lastAssignedAt)[0] ?? null;
+
+function sendToClient(client, event, data) {
+  if (!extClients.has(client)) return false;
+  try {
+    client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sendJob(job, client) {
+  job.client = client;
+  client.jobs.add(job.id);
+  client.lastAssignedAt = Date.now();
+  pendingJobs.delete(job);
+  logger.debug('job', `dispatch · kind=${job.kind}${job.modelId ? ` model=${job.modelId}` : ''}${job.conversationId ? ` conversation=${job.conversationId}` : ''} worker=${client.id.slice(0, 8)} load=${client.jobs.size}/${EXTENSION_CONCURRENCY}`);
+  const payload = job.kind === 'loader'
+    ? { jobId: job.id, kind: 'loader', url: job.url }
+    : job.kind === 'create'
+    ? { jobId: job.id, kind: 'create', modelId: job.modelId, message: job.message, requestId: job.requestId, assistant: job.assistant, assistantField: job.assistantField, temporary: job.temporary }
+    : { jobId: job.id, kind: 'chat', conversationId: job.conversationId, modelId: job.modelId, text: job.text, parts: job.parts, aspectRatio: job.aspectRatio, temporary: job.temporary, thinkingLevel: job.thinkingLevel };
+  if (!sendToClient(client, 'job', payload)) {
+    client.jobs.delete(job.id);
+    job.client = null;
+    pendingJobs.add(job);
+  }
+}
+
+function dispatchPending() {
+  for (const job of [...pendingJobs]) {
+    if (job.settled) { pendingJobs.delete(job); continue; }
+    const client = pickClient();
+    if (!client) return;
+    sendJob(job, client);
+  }
+}
 
 class Job {
   constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, timeoutMs, onDelta, onDone, onError }) {
@@ -219,14 +288,10 @@ class Job {
   }
   dispatch() {
     const client = pickClient();
-    if (!client) return this.fail('no extension connected — open a de.aipass.net tab and check the popup');
-    this.client = client;
-    logger.debug('job', `dispatch · kind=${this.kind}${this.modelId ? ` model=${this.modelId}` : ''}${this.conversationId ? ` conversation=${this.conversationId}` : ''}`);
-    sendToClient(client, 'job', this.kind === 'loader'
-      ? { jobId: this.id, kind: 'loader', url: this.url }
-      : this.kind === 'create'
-      ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField, temporary: this.temporary }
-      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel });
+    if (client) return sendJob(this, client);
+    if (!readyClients().length) return this.fail('no extension connected or ready — open a de.aipass.net tab and check the popup');
+    pendingJobs.add(this);
+    logger.debug('job', `queued · kind=${this.kind} waiting for extension capacity`);
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
   done(value) { if (this.settled) return; logger.debug('job', `done · kind=${this.kind} result=${value ?? 'stop'}`); this.cleanup(); this.onDone(value ?? 'stop'); }
@@ -251,7 +316,14 @@ class Job {
     if (this.client) sendToClient(this.client, 'abort', { jobId: this.id });
     this.cleanup();
   }
-  cleanup() { this.settled = true; clearTimeout(this.timer); jobs.delete(this.id); }
+  cleanup() {
+    this.settled = true;
+    clearTimeout(this.timer);
+    pendingJobs.delete(this);
+    this.client?.jobs.delete(this.id);
+    jobs.delete(this.id);
+    queueMicrotask(dispatchPending);
+  }
 }
 
 const fetchLoader = (url, timeoutMs = 20_000) =>
@@ -745,7 +817,10 @@ async function chatCompletions(req, res) {
   const created = Math.floor(Date.now() / 1000);
   const imageCount = (parts ?? []).filter(p => p.type === 'image').length;
   apiRequestCount++;
-  lastApiRequestAt = new Date().toISOString();
+  const requestAt = Date.now();
+  apiRequestTimes.push(requestAt);
+  apiRequestsLastHour(requestAt);
+  lastApiRequestAt = new Date(requestAt).toISOString();
   logger.info('chat', `request · model=${model} input=${Buffer.byteLength(text)}B${imageCount ? ` images=${imageCount}` : ''} mode=${reuseConversation ? 'reuse' : PER_REQUEST_CONVERSATIONS ? 'temporary' : 'shared'} stream=${Boolean(payload.stream)}`);
 
   if (payload.stream) {
@@ -836,21 +911,19 @@ function extEvents(req, res) {
     connection: 'keep-alive',
     ...corsHeaders(),
   });
-  const client = { id: randomUUID(), res };
+  const client = { id: randomUUID(), res, ready: false, lastSeenAt: 0, lastAssignedAt: 0, jobs: new Set(), warmed: false };
   extClients.add(client);
-  logger.info('extension', `connected · total=${extClients.size}`);
+  logger.info('extension', `connected · awaiting handshake · total=${extClients.size}`);
   sendToClient(client, 'ready', { clientId: client.id });
-  // Warm the caches a moment after the tab attaches — but only if this client
-  // is still the reason to: a tab that closed in the meantime would otherwise
-  // send a loader job to whoever connected next.
-  const warm = (fn, ms) => setTimeout(() => { if (extClients.has(client)) fn().catch(() => {}); }, ms);
-  warm(() => listModels({ force: true }), 500);
-  warm(() => getQuota({ force: true }), 900);
 
   const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
   req.on('close', () => {
     clearInterval(ping);
     extClients.delete(client);
+    for (const jobId of client.jobs) {
+      const job = jobs.get(jobId);
+      if (job) job.client = null;
+    }
     logger.info('extension', `disconnected · remaining=${extClients.size}`);
     // Do NOT fail in-flight jobs. The upstream fetch lives in the page and
     // survives the worker being evicted, which is exactly what happens during
@@ -859,12 +932,35 @@ function extEvents(req, res) {
   });
 }
 
+async function extClientSignal(req, res) {
+  let body;
+  try { body = JSON.parse(await readBody(req)); }
+  catch { return json(res, 400, { ok: false }); }
+  const client = [...extClients].find((item) => item.id === body.clientId);
+  if (!client) return json(res, 200, { ok: false, reason: 'unknown client' });
+  client.lastSeenAt = Date.now();
+  if (!client.ready) {
+    client.ready = true;
+    logger.info('extension', `ready · total=${readyClients().length} capacity=${readyClients().length * EXTENSION_CONCURRENCY}`);
+    // Warm only a confirmed worker. An unacknowledged stale connection must
+    // never consume cache jobs or become eligible for client work.
+    if (!client.warmed) {
+      client.warmed = true;
+      setTimeout(() => { if (extClients.has(client) && client.ready) listModels({ force: true }).catch(() => {}); }, 500);
+      setTimeout(() => { if (extClients.has(client) && client.ready) getQuota({ force: true }).catch(() => {}); }, 900);
+    }
+  }
+  dispatchPending();
+  return json(res, 200, { ok: true });
+}
+
 async function extPost(req, res, kind) {
   let body;
   try { body = JSON.parse(await readBody(req)); }
   catch { return json(res, 400, { ok: false }); }
   const job = jobs.get(body.jobId);
   if (!job) return json(res, 200, { ok: false, reason: 'unknown job' });
+  if (job.client) job.client.lastSeenAt = Date.now();
   if (kind === 'chunk') for (const part of body.parts ?? []) job.delta(part);
   else if (kind === 'done') job.done(body.finishReason);
   else if (kind === 'loader') {
@@ -884,11 +980,18 @@ function healthStatus() {
   }
   return {
     ok: true,
-    extensions: extClients.size,
+    // extensions is intentionally the ready count: a TCP/SSE connection that
+    // has not completed the worker handshake cannot receive user work.
+    extensions: readyClients().length,
+    extensionConnections: extClients.size,
+    extensionCapacity: readyClients().length * EXTENSION_CONCURRENCY,
+    extensionActiveJobs: [...extClients].reduce((total, client) => total + client.jobs.size, 0),
+    queuedJobs: pendingJobs.size,
     activeJobs: jobs.size,
     oldestJobAgeMs,
     oldestJobIdleMs,
     apiRequests: apiRequestCount,
+    apiRequestsLastHour: apiRequestsLastHour(now),
     lastApiRequestAt,
     authFailures: authFailureCount,
     lastAuthFailureAt,
@@ -916,7 +1019,7 @@ const server = http.createServer(async (req, res) => {
     return res.end('forbidden: unexpected Host header\n');
   }
 
-  if (req.method === 'OPTIONS') {
+    if (req.method === 'OPTIONS') {
     // Without an explicit AIPASS_CORS_ORIGIN this preflight carries no
     // allow-origin, so a browser page cannot call the bridge cross-origin.
     res.writeHead(204, {
@@ -925,8 +1028,12 @@ const server = http.createServer(async (req, res) => {
       'access-control-allow-headers': '*',
       'access-control-max-age': '86400',
     });
-    return res.end();
-  }
+      return res.end();
+    }
+
+    if (!keyExemptPath(path) && !apiAuthorized(req)) {
+      return oaiError(res, 401, 'missing or invalid API key', 'authentication_error');
+    }
 
   try {
     if (path === '/v1/chat/completions' && req.method === 'POST') return await chatCompletions(req, res);
@@ -1038,6 +1145,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (path === '/ext/events' && req.method === 'GET') return extEvents(req, res);
+    if ((path === '/ext/ready' || path === '/ext/heartbeat') && req.method === 'POST') return await extClientSignal(req, res);
     if (path === '/ext/chunk' && req.method === 'POST') return await extPost(req, res, 'chunk');
     if (path === '/ext/done' && req.method === 'POST') return await extPost(req, res, 'done');
     if (path === '/ext/error' && req.method === 'POST') return await extPost(req, res, 'error');
@@ -1070,4 +1178,5 @@ server.listen(PORT, HOST, () => {
     ? 'conversations · one temporary chat per API call'
     : `conversation · ${PINNED_CONVERSATION || 'most recent on the account'}`);
   logger.info('bridge', 'waiting for the Chrome extension…');
+  logger.info('auth', API_KEY ? 'API key protection · enabled' : 'API key protection · disabled (set AIPASS_API_KEY to require one)');
 });

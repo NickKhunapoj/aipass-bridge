@@ -16,6 +16,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   console.log(`usage: npm run doctor [options]
 
   --bridge URL   bridge base URL     (default: http://127.0.0.1:8787)
+  --api-key KEY  bridge API key (or set AIPASS_API_KEY)
   --chat         send a test message even when no free model is available
   --no-chat      skip the round trip entirely
 
@@ -24,6 +25,8 @@ Exits 0 when every check passes, 1 otherwise.`);
 }
 
 const BRIDGE = (flag('bridge', process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787')).replace(/\/+$/, '');
+const API_KEY = flag('api-key', process.env.AIPASS_API_KEY ?? '');
+const authHeaders = API_KEY ? { authorization: `Bearer ${API_KEY}` } : {};
 const FORCE_CHAT = argv.includes('--chat');
 const NO_CHAT = argv.includes('--no-chat');
 
@@ -33,7 +36,7 @@ const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
 const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 
-const get = (p) => fetch(`${BRIDGE}${p}`).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => null) }));
+const get = (p) => fetch(`${BRIDGE}${p}`, { headers: authHeaders }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => null) }));
 
 let failed = 0;
 let warned = 0;
@@ -134,7 +137,7 @@ if (NO_CHAT || !status?.extensions) {
   try {
     const res = await fetch(`${BRIDGE}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeaders },
       body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with the single word: ok' }] }),
     });
     const body = await res.json();

@@ -152,12 +152,14 @@ interactive terminal, levels and components are colour-coded. Set
 ## From code
 
 The endpoint is OpenAI-compatible, so any SDK works — point it at
-`http://127.0.0.1:8787/v1` with any dummy key (auth is your browser session).
+`http://127.0.0.1:8787/v1`. When `AIPASS_API_KEY` is configured, use that
+value as the SDK key; otherwise a dummy key is accepted for local development.
 
 ```python
+import os
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="sk-dummy")
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key=os.environ["AIPASS_API_KEY"])
 stream = client.chat.completions.create(
     model="gemini-3.1-flash-lite",
     messages=[{"role": "user", "content": "Hello! What can you do?"}],
@@ -170,7 +172,7 @@ for chunk in stream:
 ```typescript
 import OpenAI from "openai";
 
-const openai = new OpenAI({ baseURL: "http://127.0.0.1:8787/v1", apiKey: "sk-dummy" });
+const openai = new OpenAI({ baseURL: "http://127.0.0.1:8787/v1", apiKey: process.env.AIPASS_API_KEY });
 const stream = await openai.chat.completions.create({
   model: "gemini-3.1-flash-lite",
   messages: [{ role: "user", content: "Tell me a fun fact." }],
@@ -680,9 +682,11 @@ decimals is a pool of 10,000 — the bridge does that division for you.
 | `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
 | `AIPASS_PER_REQUEST_CONVERSATIONS` | `1` | `0` restores legacy shared-conversation behavior |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
+| `AIPASS_EXTENSION_CONCURRENCY` | `4` | concurrent API jobs allowed per ready extension worker |
 | `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin to call the bridge — see below |
 | `AIPASS_ALLOWED_HOSTS` | *(unset)* | extra hostnames accepted in the `Host` header |
 | `AIPASS_ADMIN` | *(unset)* | `1` enables the container-management routes |
+| `AIPASS_API_KEY` | *(unset)* | require this bearer token for client and admin routes |
 
 The optional Docker deployment adds `/ready` (a `503` until an extension is
 attached), a Docker healthcheck, a staged browser/extension watchdog, and an
@@ -690,8 +694,13 @@ optional Slack-compatible alert webhook. See [`deploy/`](deploy/README.md).
 
 ### Why the bridge is closed by default
 
-The bridge has **no authentication** — anything that can reach it can spend the
-account's credits. So it refuses to be reachable from a web page:
+Without `AIPASS_API_KEY`, the bridge has **no authentication** — anything that
+can reach it can spend the account's credits. Set a long random key for any
+private endpoint and clients must send `Authorization: Bearer <key>` (or
+`X-API-Key`). `/health`, `/ready`, `/status`, and the loopback-only extension
+channel remain unauthenticated so monitoring and the extension keep working.
+
+It also refuses to be reachable from a web page:
 
 - **No CORS.** The CLI clients ignore CORS and the extension reaches the bridge
   with host-permission privilege, so neither needs it. Without an

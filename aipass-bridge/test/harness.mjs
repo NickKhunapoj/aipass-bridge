@@ -216,7 +216,12 @@ export class FakeExtension {
             if (l.startsWith('event:')) name = l.slice(6).trim();
             else if (l.startsWith('data:')) data.push(l.slice(5).trim());
           }
-          if (!data.length || name !== 'job') continue;
+          if (!data.length) continue;
+          if (name === 'ready') {
+            await this.post('/ext/ready', { clientId: JSON.parse(data.join('\n')).clientId });
+            continue;
+          }
+          if (name !== 'job') continue;
           this.#handle(JSON.parse(data.join('\n')));
         }
       }

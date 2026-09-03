@@ -3,6 +3,8 @@
 // liners in package.json, which is a code-execution shape that upstream
 // filters reject when the agent reads its own package.json back.
 const BRIDGE = (process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
+const API_KEY = process.env.AIPASS_API_KEY ?? '';
+const authHeaders = API_KEY ? { authorization: `Bearer ${API_KEY}` } : {};
 const argv = process.argv.slice(2);
 const what = argv[0] ?? 'models';
 
@@ -17,13 +19,14 @@ if (argv.some((a) => ['--help', '-h', 'help'].includes(a))) {
   credits        how much of the credit pool is left
 
   AIPASS_BRIDGE  bridge base URL (default: http://127.0.0.1:8787)
+  AIPASS_API_KEY bridge API key, when authentication is enabled
 
 Each is a thin wrapper over: node aipass-bridge/list.mjs <what>`);
   process.exit(0);
 }
 
 const get = async (p) => {
-  const res = await fetch(`${BRIDGE}${p}`);
+  const res = await fetch(`${BRIDGE}${p}`, { headers: authHeaders });
   if (!res.ok) throw new Error(`bridge returned ${res.status}`);
   return res.json();
 };

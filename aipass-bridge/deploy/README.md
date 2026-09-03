@@ -41,6 +41,21 @@ cp .env.example .env          # optionally set noVNC_PASSWORD
 ./reset.sh                    # build + start (docker compose up -d --build)
 ```
 
+Before starting a private endpoint, set a long random API key in `.env`:
+
+```bash
+openssl rand -hex 32
+# Copy the result into: AIPASS_API_KEY=...
+```
+
+OpenAI-compatible clients then use that value as their bearer token. The
+Docker health endpoints and extension relay do not need the key.
+
+The bridge accepts multiple simultaneous OpenAI-compatible clients. Each ready
+extension worker serves up to four isolated API jobs by default; excess jobs
+queue rather than being sent to a busy or stale worker. Set
+`AIPASS_EXTENSION_CONCURRENCY` in `.env` to tune the per-worker limit.
+
 Then:
 
 1. Tunnel to noVNC (command above) and open `http://127.0.0.1:6080`.

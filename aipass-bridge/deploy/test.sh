@@ -1,6 +1,8 @@
 #!/bin/bash
 # End-to-end check: bridge up, extension connected, models list, one chat.
 BASE_URL="http://127.0.0.1:8787"
+AUTH=()
+if [ -n "${AIPASS_API_KEY:-}" ]; then AUTH=(-H "Authorization: Bearer ${AIPASS_API_KEY}"); fi
 echo "=== aipass-bridge diagnostics ==="
 
 echo; echo "1. bridge status"
@@ -14,10 +16,11 @@ else
 fi
 
 echo; echo "2. models (/v1/models)"
-curl -s "${BASE_URL}/v1/models"
+curl -s "${AUTH[@]}" "${BASE_URL}/v1/models"
 
 echo; echo; echo "3. chat completion (gemini-3.1-flash-lite)"
 curl -s -X POST "${BASE_URL}/v1/chat/completions" \
+  "${AUTH[@]}" \
   -H "Content-Type: application/json" \
   -d '{"model":"gemini-3.1-flash-lite","messages":[{"role":"user","content":"reply in one short sentence that the system is ready"}]}'
 echo

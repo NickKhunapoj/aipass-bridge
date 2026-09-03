@@ -12,6 +12,9 @@ const CYCLE_MS = 4 * 60 * 1000; // reconnect before Chrome's long-request ceilin
 let controller = null;
 let connected = false;
 let lastError = '';
+let bridgeClientId = null;
+let workerReady = false;
+let readinessSetup = null;
 // jobId -> { tabId }. Every request runs against the signed-in chat tab.
 const jobTabs = new Map();
 
@@ -63,14 +66,17 @@ const bridgeUrl = async () => {
 
 async function post(path, body) {
   try {
-    await fetch(`${await bridgeUrl()}${path}`, {
+    const res = await fetch(`${await bridgeUrl()}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
+    if (!res.ok) throw new Error(`bridge responded ${res.status}`);
+    return true;
   } catch (err) {
     lastError = String(err?.message ?? err);
     console.warn('[aipass-bg] POST error:', path, lastError);
+    return false;
   }
 }
 
@@ -121,11 +127,35 @@ async function ensureContentScript(tab) {
     await waitForComplete(tab.id);
   }
 
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', files: ['page.js'] }).catch(() => {});
+  // Resolving this injection is the readiness check. Silently ignoring a
+  // failure makes the SSE worker look healthy while every API job disappears.
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', files: ['page.js'] });
   if (!ok) {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'ISOLATED', files: ['content.js'] }).catch(() => {});
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'ISOLATED', files: ['content.js'] });
     await ping();
   }
+}
+
+async function announceReady(clientId = bridgeClientId) {
+  if (!connected || !clientId || workerReady) return;
+  if (readinessSetup) return readinessSetup;
+  readinessSetup = (async () => {
+    const tab = await findChatTab();
+    if (!tab) throw new Error('no de.aipass.net tab is open');
+    await ensureContentScript(tab);
+    if (!connected || bridgeClientId !== clientId) return;
+    if (await post('/ext/ready', { clientId })) {
+      workerReady = true;
+      lastError = '';
+    }
+  })().catch((err) => {
+    workerReady = false;
+    lastError = `AiPASS tab is not ready: ${err?.message ?? err}`;
+    console.warn('[aipass-bg] readiness:', lastError);
+  }).finally(() => {
+    readinessSetup = null;
+  });
+  return readinessSetup;
 }
 
 async function handleJob(job) {
@@ -148,7 +178,11 @@ async function handleJob(job) {
 }
 
 function handleEvent(name, data) {
-  if (name === 'job') handleJob(data);
+  if (name === 'ready') {
+    bridgeClientId = data?.clientId ?? null;
+    workerReady = false;
+    if (bridgeClientId) announceReady(bridgeClientId);
+  } else if (name === 'job') handleJob(data);
   else if (name === 'abort') {
     const record = jobTabs.get(data.jobId);
     if (record) chrome.tabs.sendMessage(record.tabId, { type: 'abort', jobId: data.jobId }).catch(() => {});
@@ -179,6 +213,8 @@ async function connect() {
     if (!res.ok || !res.body) throw new Error(`bridge responded ${res.status}`);
 
     connected = true;
+    bridgeClientId = null;
+    workerReady = false;
     lastError = '';
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -209,10 +245,29 @@ async function connect() {
   } finally {
     clearTimeout(cycle);
     connected = false;
+    bridgeClientId = null;
+    workerReady = false;
     controller = null;
     setTimeout(connect, RECONNECT_MS);
   }
 }
+
+// An SSE socket can linger after its worker has become unusable. The heartbeat
+// lets the bridge exclude that stale connection from its worker pool instead
+// of round-robining API requests into it until they time out.
+setInterval(() => {
+  if (!connected || !bridgeClientId) return;
+  if (workerReady) post('/ext/heartbeat', { clientId: bridgeClientId });
+  else announceReady(bridgeClientId);
+}, 20_000);
+
+// A tab opened or reloaded after the worker connected should become usable
+// without waiting for the next heartbeat retry.
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && /^https:\/\/(?:[^/]+\.)?aipass\.net\//i.test(tab.url ?? '')) {
+    announceReady();
+  }
+});
 
 // A content script and the offscreen document each hold one of these open, which
 // is what stops Chrome evicting the worker.
@@ -242,6 +297,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const tab = await findChatTab();
       sendResponse({
         connected,
+        ready: workerReady,
         lastError,
         bridgeUrl: await bridgeUrl(),
         tab: tab ? { id: tab.id, url: tab.url } : null,

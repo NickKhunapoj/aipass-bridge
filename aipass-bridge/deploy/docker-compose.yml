@@ -26,9 +26,14 @@ services:
       - AIPASS_PORT=8787
       - AIPASS_HOST=0.0.0.0
       - AIPASS_MODEL=gemini-3.1-flash-lite
+      # Each ready browser extension can serve this many isolated API requests.
+      - AIPASS_EXTENSION_CONCURRENCY=${AIPASS_EXTENSION_CONCURRENCY:-4}
       # The container-management routes (/restart, /logs, /browser/restart,
       # /ext/reload, /tab/reload) exist only here, not in a local run.
       - AIPASS_ADMIN=1
+      # Protect OpenAI-compatible and management routes. Health/status and the
+      # browser extension channel stay internal and do not require this key.
+      - AIPASS_API_KEY=${AIPASS_API_KEY:-}
       # Reaching the bridge through a hostname other than localhost (a reverse
       # proxy, say) needs that name listed here — it is refused otherwise.
       - AIPASS_ALLOWED_HOSTS=${AIPASS_ALLOWED_HOSTS:-}

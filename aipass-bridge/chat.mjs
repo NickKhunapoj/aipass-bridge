@@ -22,6 +22,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --new               start a fresh conversation instead of the most recent
   --temporary         start a throwaway one, kept out of the chat history
   --bridge URL        bridge base URL       (default: http://127.0.0.1:8787)
+  --api-key KEY       bridge API key (or set AIPASS_API_KEY)
   --file PATH         attach a document or image; repeat for several
   --thinking LEVEL    how hard a reasoning model thinks (low, medium, high —
                       and max on Claude Opus)
@@ -36,6 +37,8 @@ With a question, it answers and exits. Without one it stays interactive, where
 }
 
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
+const API_KEY = flag('api-key', process.env.AIPASS_API_KEY ?? '');
+const authHeaders = API_KEY ? { authorization: `Bearer ${API_KEY}` } : {};
 const CONVERSATION = flag('conversation', null);
 const NEW = argv.includes('--new');
 const TEMPORARY = argv.includes('--temporary');
@@ -101,12 +104,12 @@ model ??= status.defaultModel;
 
 if (CONVERSATION) {
   await fetch(`${BRIDGE}/config`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders },
     body: JSON.stringify({ conversation: CONVERSATION }),
   }).catch(() => {});
 } else if (NEW || TEMPORARY) {
   const made = await fetch(`${BRIDGE}/conversations/new`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders },
     body: JSON.stringify({ model, temporary: TEMPORARY, message: 'New chat.' }),
   }).then((r) => r.json()).catch(() => null);
   if (made?.id) status.conversation = made.id;
@@ -189,7 +192,7 @@ async function ask(text) {
     : text;
   const res = await fetch(`${BRIDGE}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...authHeaders },
     body: JSON.stringify({
       model, stream: true, messages: [{ role: 'user', content }],
       ...(RATIO ? { aspect_ratio: RATIO } : {}),
@@ -261,14 +264,14 @@ async function handleBlock(lines) {
   if (!block) return;
 
   if (lines.length === 1 && block === '/models') {
-    const { data } = await fetch(`${BRIDGE}/v1/models`).then((r) => r.json());
+    const { data } = await fetch(`${BRIDGE}/v1/models`, { headers: authHeaders }).then((r) => r.json());
     for (const m of data) console.log(`  ${m.id.padEnd(38)} ${m.name}${m.free_credit ? dim('  [free]') : ''}`);
     return;
   }
   if (lines.length === 1 && block.startsWith('/model ')) {
     model = block.slice(7).trim();
     await fetch(`${BRIDGE}/config`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders },
       body: JSON.stringify({ defaultModel: model }),
     }).catch(() => {});
     console.log(dim(`  model ${model}`));

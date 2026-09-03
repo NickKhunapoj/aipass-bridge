@@ -26,6 +26,8 @@ const has = (name) => argv.includes(`--${name}`);
 const task = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
 const ROOT = path.resolve(flag('root', process.cwd()));
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
+const API_KEY = flag('api-key', process.env.AIPASS_API_KEY ?? '');
+const authHeaders = API_KEY ? { authorization: `Bearer ${API_KEY}` } : {};
 const MODEL = flag('model', null);
 const MAX_STEPS = Number(flag('max', 10));
 const APPLY = has('apply');
@@ -69,7 +71,8 @@ if (!task || HELP) {
   --permanent     keep the run's conversation in chat history (default: temporary)
   --conversation ID   continue a specific conversation
   --assistant ID  bind new conversations to a custom aipass assistant
-  --bridge URL    bridge base URL                    (default: http://127.0.0.1:8787)`);
+  --bridge URL    bridge base URL                    (default: http://127.0.0.1:8787)
+  --api-key KEY   bridge API key (or set AIPASS_API_KEY)`);
   process.exit(HELP ? 0 : 1);
 }
 
@@ -371,7 +374,7 @@ function parse(reply) {
 async function say(text) {
   const res = await fetch(`${BRIDGE}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...authHeaders },
     body: JSON.stringify({ ...(MODEL ? { model: MODEL } : {}), aipass_reuse_conversation: true, stream: true, messages: [{ role: 'user', content: text }] }),
   });
   if (!res.ok) throw new Error(`bridge returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -470,7 +473,7 @@ async function sayResilient(text, depth = 0) {
 // Every model but gemini-3.1-flash-lite draws down a shared pool. Reading it
 // either side of a run turns "did that cost anything?" into a number.
 const quota = (fresh = false) =>
-  fetch(`${BRIDGE}/quota${fresh ? '?refresh=1' : ''}`)
+  fetch(`${BRIDGE}/quota${fresh ? '?refresh=1' : ''}`, { headers: authHeaders })
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null);
 
@@ -553,12 +556,12 @@ function showDiff() {
 
 if (CONVERSATION) {
   await fetch(`${BRIDGE}/config`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders },
     body: JSON.stringify({ conversation: CONVERSATION }),
   }).catch(() => {});
 } else if (!REUSE) {
   const made = await fetch(`${BRIDGE}/conversations/new`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders },
     body: JSON.stringify({
       ...(MODEL ? { model: MODEL } : {}),
       ...(ASSISTANT ? { assistant: ASSISTANT } : {}),
