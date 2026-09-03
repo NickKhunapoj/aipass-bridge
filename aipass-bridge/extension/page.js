@@ -12,6 +12,17 @@
   // How often a submitted video job is polled. The web client sits in the same
   // range; a 4-second clip takes roughly a hundred seconds to render.
   const POLL_MS = 2000;
+  // What the video job's error codes actually mean.
+  const VIDEO_ERROR_HINTS = {
+    provider_content_policy:
+      "the video provider's safety filter rejected the prompt or image. It is "
+      + 'strict about recognisable real faces, public figures, copyrighted '
+      + 'characters, violence and sensitive subjects; a crowd scene is often '
+      + 'enough. Rewrite the prompt and try again — a rejected job costs no quota',
+    contentPolicyViolation: 'the prompt was rejected by a content filter before it reached the model',
+    quotaExceeded: 'the account has used its video generations for this period — npm run credits shows the count',
+    conflictActive: 'another video job is still running on this conversation',
+  };
   const inflight = new Map();
   // How many bytes of media may be carried back inline as a data URI; above
   // this it goes back as a link, since the bridge caps a POST body at 8 MB and
@@ -488,7 +499,10 @@
           return;
         }
         if (state.status === 'failed' || state.error) {
-          throw new Error(String(state.error ?? 'video generation failed'));
+          const code = String(state.error ?? 'video generation failed');
+          // The codes are terse and the web UI expands them in Thai. A caller in
+          // a terminal gets neither, so the actionable part is spelled out here.
+          throw new Error(`${code}${VIDEO_ERROR_HINTS[code] ? ` — ${VIDEO_ERROR_HINTS[code]}` : ''}`);
         }
       }
     } catch (err) {
