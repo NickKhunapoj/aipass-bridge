@@ -20,6 +20,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --model ID          model to use          (default: whatever the bridge is set to)
   --conversation ID   continue a specific conversation
   --new               start a fresh conversation instead of the most recent
+  --temporary         start a throwaway one, kept out of the chat history
   --bridge URL        bridge base URL       (default: http://127.0.0.1:8787)
   --ratio R           image aspect ratio    (1:1, 3:4, 4:3 — image models only)
   --out DIR           where to save generated images   (default: the cwd)
@@ -34,6 +35,7 @@ With a question, it answers and exits. Without one it stays interactive, where
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 const CONVERSATION = flag('conversation', null);
 const NEW = argv.includes('--new');
+const TEMPORARY = argv.includes('--temporary');
 let model = flag('model', null);
 const OUT_DIR = path.resolve(flag('out', process.cwd()));
 const RATIO = flag('ratio', null);
@@ -60,10 +62,10 @@ if (CONVERSATION) {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ conversation: CONVERSATION }),
   }).catch(() => {});
-} else if (NEW) {
+} else if (NEW || TEMPORARY) {
   const made = await fetch(`${BRIDGE}/conversations/new`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model, message: 'New chat.' }),
+    body: JSON.stringify({ model, temporary: TEMPORARY, message: 'New chat.' }),
   }).then((r) => r.json()).catch(() => null);
   if (made?.id) status.conversation = made.id;
 }

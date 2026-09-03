@@ -41,13 +41,18 @@
   // first sixteen hex characters.
   async function runCreate(job) {
     try {
-      const params = new URLSearchParams({
-        message: job.message,
-        folderId: '',
-        modelId: job.modelId,
-        intent: 'create-conversation',
-        clientCreateRequestId: job.requestId,
-      });
+      // A temporary chat is a different intent and takes no first message: the
+      // server mints the conversation itself and marks it isTemporary, so it
+      // never lands in the account's history and expires on its own.
+      const params = job.temporary
+        ? new URLSearchParams({ intent: 'create-temporary-chat' })
+        : new URLSearchParams({
+            message: job.message,
+            folderId: '',
+            modelId: job.modelId,
+            intent: 'create-conversation',
+            clientCreateRequestId: job.requestId,
+          });
       // Bind to a custom assistant when one is configured. The field name comes
       // from the bridge so it can be corrected without touching the extension.
       if (job.assistant && job.assistantField) params.set(job.assistantField, job.assistant);
@@ -207,6 +212,11 @@
         // The image models take this; the chat models ignore it. The web UI
         // offers 1:1, 3:4 and 4:3.
         imageAspectRatio: job.aspectRatio || '1:1',
+        // A temporary conversation has to be told so on every turn, not just at
+        // creation — the web client sends this same flag with each message.
+        ...(job.temporary ? { isTemporary: true } : {}),
+        // low | medium | high, only for models that advertise thinkingConfig.
+        ...(job.thinkingLevel ? { thinkingLevel: job.thinkingLevel } : {}),
         messages: [{
           id: crypto.randomUUID(),
           role: 'user',

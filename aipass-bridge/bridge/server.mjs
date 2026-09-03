@@ -170,7 +170,7 @@ const sendToClient = (client, event, data) =>
   client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
 class Job {
-  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, timeoutMs, onDelta, onDone, onError }) {
+  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, timeoutMs, onDelta, onDone, onError }) {
     this.id = randomUUID();
     this.kind = kind;
     this.url = url;
@@ -178,6 +178,8 @@ class Job {
     this.requestId = requestId;
     this.assistant = assistant;
     this.assistantField = assistantField;
+    this.temporary = temporary;
+    this.thinkingLevel = thinkingLevel;
     this.timeoutMs = timeoutMs ?? IDLE_TIMEOUT_MS;
     this.modelId = modelId;
     this.text = text;
@@ -202,8 +204,8 @@ class Job {
     sendToClient(client, 'job', this.kind === 'loader'
       ? { jobId: this.id, kind: 'loader', url: this.url }
       : this.kind === 'create'
-      ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField }
-      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio });
+      ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField, temporary: this.temporary }
+      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel });
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
   done(value) { if (this.settled) return; this.cleanup(); this.onDone(value ?? 'stop'); }
@@ -311,6 +313,9 @@ async function getQuota({ force = false } = {}) {
 // Conversations are created by the server; posting to an invented id is
 // rejected. Reuse the most recent, and move on if one stops accepting messages.
 let conversationCache = null;
+// Whether the cached conversation was created with intent=create-temporary-chat.
+// Every turn of a temporary chat has to repeat the flag, so it is tracked here.
+let conversationIsTemporary = false;
 let conversationList = [];
 let conversationIndex = 0;
 
@@ -343,23 +348,31 @@ function findValue(node, key) {
 
 // The chat page creates a conversation by posting its first message to
 // /chat.data; the server derives the id from clientCreateRequestId.
-async function createConversation({ modelId = defaultModel, message = 'Hello', assistant } = {}) {
+// `temporary: true` posts intent=create-temporary-chat instead. The server
+// mints a conversation that never appears in the account's history and expires
+// on its own — which is what an agent run wants: nothing to clean up, nothing
+// to rotate past, and no earlier conversation to inherit.
+async function createConversation({ modelId = defaultModel, message = 'Hello', assistant, temporary = false } = {}) {
   const requestId = randomUUID();
   const raw = await new Promise((resolve, reject) => {
     const job = new Job({
-      kind: 'create', modelId, message, requestId,
+      kind: 'create', modelId, message, requestId, temporary,
       assistant: assistant ?? assistantId, assistantField: ASSISTANT_FIELD,
       timeoutMs: 30_000,
       onDelta: () => {}, onDone: resolve, onError: (m) => reject(new Error(m)),
     });
     job.dispatch();
   });
-  const id = findValue(decodeTurboStream(raw), 'conversationId');
+  const decoded = decodeTurboStream(raw);
+  // create-conversation answers with conversationId; create-temporary-chat
+  // answers with the conversation object, whose id lives under `id`.
+  const id = findValue(decoded, 'conversationId') ?? findValue(decoded, 'id');
   if (!id) throw new Error(`could not read a conversation id from the response: ${raw.slice(0, 200)}`);
   conversationCache = id;
+  conversationIsTemporary = Boolean(temporary);
   conversationIndex = 0;
   conversationList = [];
-  log(`created conversation ${id}`);
+  log(`created ${temporary ? 'temporary ' : ''}conversation ${id}`);
   return id;
 }
 
@@ -372,6 +385,7 @@ async function resolveConversation() {
     throw new Error('no usable conversation — open https://de.aipass.net/chat, start one, then POST /config {"conversation":null}');
   }
   conversationCache = pick.id;
+  conversationIsTemporary = pick.isTemporary === true;
   log(`conversation ${conversationCache} (${pick.title ?? 'untitled'})`);
   return conversationCache;
 }
@@ -380,7 +394,7 @@ async function resolveConversation() {
 
 // A 404 means the conversation was deleted; a 409 means the server still
 // believes a generation is running there. Neither recovers on its own.
-function startChat({ modelId, text, parts, aspectRatio: ratio, onDelta, onDone, onError }) {
+function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, onDelta, onDone, onError }) {
   let attempts = 0;
   let delivered = 0;
   let current = null;
@@ -392,7 +406,8 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, onDelta, onDone, 
     catch (err) { return onError(err.message); }
 
     current = new Job({
-      modelId, text, parts, conversationId, aspectRatio: ratio,
+      modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel,
+      temporary: conversationIsTemporary,
       onDelta: (part) => { delivered++; onDelta(part); },
       onDone,
       onError: (message) => {
@@ -577,6 +592,10 @@ async function chatCompletions(req, res) {
   // Not an OpenAI field, so a client that knows about it can send either
   // spelling; otherwise the bridge default applies.
   const ratio = String(payload.aspect_ratio ?? payload.imageAspectRatio ?? aspectRatio).trim() || '1:1';
+  // Models that advertise thinkingConfig accept low | medium | high; everything
+  // else ignores it, so an unknown value costs nothing.
+  const thinking = String(payload.thinking_level ?? payload.thinkingLevel ?? '').trim().toLowerCase();
+  const thinkingLevel = ['low', 'medium', 'high'].includes(thinking) ? thinking : undefined;
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
 
@@ -602,7 +621,7 @@ async function chatCompletions(req, res) {
     emit({ role: 'assistant', content: '' });
 
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
       onDelta: (part) => {
         if (part.kind === 'status') {
           if (TOOL_VISIBILITY === 'off') return;
@@ -635,7 +654,7 @@ async function chatCompletions(req, res) {
   let reasoning = '';
   await new Promise((resolve) => {
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
         if (p.kind === 'image') { out += `\n![image](${p.text})\n`; return; }
@@ -763,8 +782,11 @@ const server = http.createServer(async (req, res) => {
 
     if (path === '/conversations/new' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
-      const id = await createConversation({ modelId: body.model, message: body.message, assistant: body.assistant });
-      return json(res, 200, { id });
+      const id = await createConversation({
+        modelId: body.model, message: body.message, assistant: body.assistant,
+        temporary: body.temporary === true,
+      });
+      return json(res, 200, { id, temporary: conversationIsTemporary });
     }
     if (path === '/conversations') {
       await loadConversations().catch(() => {});
@@ -786,12 +808,15 @@ const server = http.createServer(async (req, res) => {
         log(`aspect ratio ${aspectRatio}`);
       }
       if (body.conversation === null || typeof body.conversation === 'string') {
+        // Pinning an id says nothing about how it was created, so it is treated
+        // as an ordinary conversation unless the caller declares otherwise.
         conversationCache = body.conversation || null;
+        conversationIsTemporary = body.temporary === true;
         conversationIndex = 0;
         if (!conversationCache) conversationList = [];
         log(conversationCache ? `conversation ${conversationCache}` : 'conversation cleared');
       }
-      return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, aspectRatio, conversation: PINNED_CONVERSATION || conversationCache });
+      return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, aspectRatio, conversation: PINNED_CONVERSATION || conversationCache, temporary: conversationIsTemporary });
     }
 
     // Container-management routes. Only the Docker deployment needs these, and
@@ -851,6 +876,7 @@ const server = http.createServer(async (req, res) => {
         activeJobs: jobs.size,
         defaultModel,
         conversation: PINNED_CONVERSATION || conversationCache,
+        temporary: conversationIsTemporary,
         assistant: assistantId || null,
         aspectRatio,
         models: cachedModels(),

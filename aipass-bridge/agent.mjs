@@ -35,6 +35,10 @@ const CONVERSATION = flag('conversation', null);
 // A conversation carries its own history, so reusing one drags in whatever was
 // said before — including any refusal. Each run gets a fresh one by default.
 const REUSE = has('reuse');
+// A run gets a throwaway conversation by default: it never enters the account's
+// chat history, cannot inherit anything said in an earlier run, and expires on
+// its own. --permanent keeps the old behaviour of a normal saved conversation.
+const PERMANENT = has('permanent');
 // When the conversation is bound to a custom aipass assistant that already
 // carries the NEED/EDIT/CREATE/DONE instructions, the preamble is redundant —
 // and sending it again is just extra payload for the edge to inspect.
@@ -62,6 +66,7 @@ if (!task || HELP) {
   --max-result N  truncate each tool result          (default: 3000 bytes)
   --watch         stay open for follow-up tasks on the same conversation
   --reuse         continue the most recent conversation instead of a new one
+  --permanent     keep the run's conversation in chat history (default: temporary)
   --conversation ID   continue a specific conversation
   --assistant ID  bind new conversations to a custom aipass assistant
   --bridge URL    bridge base URL                    (default: http://127.0.0.1:8787)`);
@@ -545,7 +550,12 @@ if (CONVERSATION) {
 } else if (!REUSE) {
   const made = await fetch(`${BRIDGE}/conversations/new`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...(MODEL ? { model: MODEL } : {}), ...(ASSISTANT ? { assistant: ASSISTANT } : {}), message: 'Starting a new working session.' }),
+    body: JSON.stringify({
+      ...(MODEL ? { model: MODEL } : {}),
+      ...(ASSISTANT ? { assistant: ASSISTANT } : {}),
+      temporary: !PERMANENT,
+      message: 'Starting a new working session.',
+    }),
   }).then((r) => r.json()).catch((err) => ({ error: { message: String(err.message) } }));
   if (made?.error) console.error(red(`could not start a new conversation: ${made.error.message}`));
 }
@@ -559,7 +569,7 @@ if (bridgeStatus?.credits) {
     (c.periodEndsAt ? dim(`  · resets ${c.periodEndsAt.slice(0, 10)}`) : ''));
 }
 console.log(bold('chat  ') + (bridgeStatus?.conversation ?? 'resolves on first message') +
-  dim(CONVERSATION ? '  (continuing)' : REUSE ? '  (reusing the most recent)' : '  (new)') +
+  dim(CONVERSATION ? '  (continuing)' : REUSE ? '  (reusing the most recent)' : PERMANENT ? '  (new)' : '  (new, temporary)') +
   (ASSISTANT ? dim(`  · assistant ${ASSISTANT}`) : ''));
 
 const useSlim = SLIM || Boolean(ASSISTANT);

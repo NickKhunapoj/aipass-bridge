@@ -99,6 +99,25 @@ export const createFixture = (requestId, initialMessage) => encodeTurboStream({
   },
 });
 
+// intent=create-temporary-chat answers with the conversation object itself —
+// no conversationId field, the id lives under `id` — and marks it temporary.
+export const temporaryChatFixture = (id = 'M5uhmgOBsPk0v4WN') => encodeTurboStream({
+  data: {
+    conversation: {
+      id,
+      aiAssistantId: null,
+      title: 'New Conversation',
+      modelId: 'gemini-3.1-flash-lite',
+      isTemporary: true,
+      expiresAt: '2027-09-03T04:42:45.870Z',
+      routingMode: 'manual',
+      isPinned: false,
+      createdAt: '2026-09-03T04:42:45.870Z',
+    },
+    error: null,
+  },
+});
+
 // get-usage-quota answers with plain JSON, not turbo-stream. Figures are
 // integers scaled by creditsDecimals, exactly as the real loader sends them.
 export const quotaFixture = ({ limit = '10000000000', used = '167042858', available = '9832957142', decimals = 6 } = {}) =>
@@ -204,7 +223,10 @@ export class FakeExtension {
   async #handle(job) {
     if (job.kind === 'create') {
       this.created.push(job);
-      return void this.post('/ext/loader', { jobId: job.jobId, raw: createFixture(job.requestId, job.message) });
+      const raw = job.temporary
+        ? temporaryChatFixture()
+        : createFixture(job.requestId, job.message);
+      return void this.post('/ext/loader', { jobId: job.jobId, raw });
     }
     if (job.kind === 'loader') {
       this.loaders.push(job.url);
