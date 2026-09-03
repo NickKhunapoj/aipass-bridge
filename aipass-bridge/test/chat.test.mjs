@@ -105,3 +105,32 @@ test('typed lines stay separate messages', async (t) => {
   assert.equal(ext.chats.length, 2, out);
   assert.deepEqual(ext.chats.map((c) => c.text), ['first', 'second']);
 });
+
+test('--file attaches a document to the first message', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  const dir = tempDir({ 'report.pdf': '%PDF-1.4\n' });
+  const { out, code } = await chat(['summarise this', '--file', path.join(dir, 'report.pdf')]);
+  assert.equal(code, 0);
+  assert.match(out, /report\.pdf/, 'the attachment is named before the answer');
+
+  const part = ext.chats.at(-1).parts.find((p) => p.type === 'file');
+  assert.equal(part.filename, 'report.pdf');
+  assert.equal(part.mediaType, 'application/pdf');
+  assert.equal(Buffer.from(part.data.split(',')[1], 'base64').toString(), '%PDF-1.4\n');
+});
+
+test('--file names the unreadable path instead of failing mid-answer', async () => {
+  const { out, code } = await chat(['hi', '--file', '/nope/missing.pdf']);
+  assert.equal(code, 1);
+  assert.match(out, /cannot read \/nope\/missing\.pdf/);
+});
+
+test('--thinking rides along with the request', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await chat(['think hard', '--model', 'claude-opus-5@azure', '--thinking', 'max']);
+  assert.equal(ext.chats.at(-1).thinkingLevel, 'max');
+});

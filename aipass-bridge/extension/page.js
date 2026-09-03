@@ -166,7 +166,9 @@
         for (const p of job.parts) {
           if (p.type === 'image' || p.type === 'file') {
             const rawUrl = p.image || p.url || p.data || '';
-            let mediaType = p.mediaType || 'image/jpeg';
+            // Images default to jpeg because that is what a bare data: URI
+            // usually is; anything else must declare what it is.
+            let mediaType = p.mediaType || (p.type === 'image' ? 'image/jpeg' : 'application/octet-stream');
             let blob = null;
             // Only data: URIs are accepted here. The bridge resolves remote
             // image URLs to data URIs server-side (behind an SSRF guard), so the
@@ -178,8 +180,8 @@
             }
             if (blob) {
               const ext = (mediaType.split('/')[1] || 'jpeg').replace(/^jpeg$/, 'jpg');
-              const filename = p.filename || `image.${ext}`;
-              push('status', `[upload] uploading image (${(blob.size / 1024).toFixed(1)} KB)...`);
+              const filename = p.filename || `${p.type === 'image' ? 'image' : 'attachment'}.${ext}`;
+              push('status', `[upload] uploading ${filename} (${(blob.size / 1024).toFixed(1)} KB)...`);
               const uploadRes = await uploadFileHelper(
                 blob,
                 filename,
@@ -215,7 +217,8 @@
         // A temporary conversation has to be told so on every turn, not just at
         // creation — the web client sends this same flag with each message.
         ...(job.temporary ? { isTemporary: true } : {}),
-        // low | medium | high, only for models that advertise thinkingConfig.
+        // The levels a model advertises in thinkingConfig.supportedLevels —
+        // low | medium | high, and max on Claude Opus. The bridge validates.
         ...(job.thinkingLevel ? { thinkingLevel: job.thinkingLevel } : {}),
         messages: [{
           id: crypto.randomUUID(),

@@ -22,6 +22,9 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --new               start a fresh conversation instead of the most recent
   --temporary         start a throwaway one, kept out of the chat history
   --bridge URL        bridge base URL       (default: http://127.0.0.1:8787)
+  --file PATH         attach a document or image; repeat for several
+  --thinking LEVEL    how hard a reasoning model thinks (low, medium, high —
+                      and max on Claude Opus)
   --ratio R           image aspect ratio    (1:1, 3:4, 4:3 — image models only)
   --out DIR           where to save generated images   (default: the cwd)
   --paste-idle MS     how long to wait before treating pasted lines as one
@@ -39,6 +42,9 @@ const TEMPORARY = argv.includes('--temporary');
 let model = flag('model', null);
 const OUT_DIR = path.resolve(flag('out', process.cwd()));
 const RATIO = flag('ratio', null);
+const THINKING = flag('thinking', null);
+// Repeatable, unlike the other flags: several files can be attached at once.
+const FILES = argv.reduce((acc, a, i) => (a === '--file' && argv[i + 1] ? [...acc, argv[i + 1]] : acc), []);
 const question = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
@@ -46,6 +52,42 @@ const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 
+// Enough of a mime table to name what the file picker in the web UI accepts.
+// Anything unlisted is sent as octet-stream, which the bridge refuses — better
+// than uploading it and getting a vaguer refusal from upstream.
+const MIME = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
+
+// Read each --file into an OpenAI `file` content part. Done once at startup so
+// an unreadable path fails before the first question, not after it.
+const attachments = FILES.map((p) => {
+  const abs = path.resolve(p);
+  let buf;
+  try { buf = fs.readFileSync(abs); }
+  catch (err) { console.error(red(`cannot read ${p}: ${err.message}`)); process.exit(1); }
+  const filename = path.basename(abs);
+  const mediaType = MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
+  return {
+    type: 'file',
+    file: { filename, file_data: `data:${mediaType};base64,${buf.toString('base64')}` },
+  };
+});
 const status = await fetch(`${BRIDGE}/status`).then((r) => r.json()).catch(() => null);
 if (!status) {
   console.error(red(`No bridge at ${BRIDGE}. Start it with: npm run dev`));
@@ -88,13 +130,25 @@ function keepImages(chunk) {
   });
 }
 
+if (attachments.length) {
+  const total = FILES.reduce((n, p) => n + fs.statSync(path.resolve(p)).size, 0);
+  const size = total < 1024 ? `${total} B` : `${(total / 1024).toFixed(1)} KB`;
+  console.log(dim(`files ${attachments.map((a) => a.file.filename).join(', ')}  (${size})`));
+}
+
 async function ask(text) {
+  // Attachments ride on the first message only — they stay in the conversation
+  // afterwards, and re-uploading them each turn would just spend credits.
+  const content = attachments.length
+    ? [{ type: 'text', text }, ...attachments.splice(0)]
+    : text;
   const res = await fetch(`${BRIDGE}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      model, stream: true, messages: [{ role: 'user', content: text }],
+      model, stream: true, messages: [{ role: 'user', content }],
       ...(RATIO ? { aspect_ratio: RATIO } : {}),
+      ...(THINKING ? { thinking_level: THINKING } : {}),
     }),
   });
   if (!res.ok) {

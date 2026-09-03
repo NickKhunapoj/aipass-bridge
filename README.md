@@ -27,6 +27,7 @@ your terminal ──▶ OpenAI-compatible API on localhost:8787 ──▶ a real
   music generators, grouped the way the web UI groups them.
 - **Generate images** — pick an image model, get a PNG
   ([example](aipass-bridge/README.md#a-worked-example)).
+- **Attach documents** — `--file report.pdf`, and ask about it.
 - **Edit local files** — an agent that reads, searches, and edits a project you point it at.
 - **See what it costs** — the credit pool, in the popup and after every agent run.
 - **Drop-in OpenAI endpoint** — point the `openai` SDK, or any tool that takes a base URL, at it.
@@ -50,6 +51,7 @@ tab. The extension popup should read **Connected**.
 npm run doctor                                     # is every link working?
 npm run chat -- "ช่วยสรุปข่าว AI วันนี้"         # chat, streaming
 npm run chat -- "แมวน่ารัก" --model gpt-image-2   # generate an image
+npm run chat -- "summarise this" --file report.pdf # ask about a document
 npm run agent -- "add a /health route" --root .    # edit local files (dry run)
 npm run models                                     # everything, by category
 npm run credits                                    # what is left of the pool

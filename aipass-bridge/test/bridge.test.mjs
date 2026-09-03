@@ -450,3 +450,83 @@ test('passes a valid thinking level through and drops a bogus one', async (t) =>
   await post({ messages: [{ role: 'user', content: 'hi' }], thinking_level: 'ludicrous' });
   assert.equal(ext.chats.at(-1).thinkingLevel, undefined, 'an unknown level must not be forwarded');
 });
+
+const PDF = 'data:application/pdf;base64,JVBERi0xLjQK';
+
+test('a document part reaches the extension named and typed', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'summarise this' },
+        { type: 'file', file: { filename: 'report.pdf', file_data: PDF } },
+      ],
+    }],
+  });
+
+  const part = ext.chats.at(-1).parts.find((p) => p.type === 'file');
+  assert.ok(part, 'the file part must survive as a file, not become an image');
+  assert.equal(part.mediaType, 'application/pdf');
+  assert.equal(part.filename, 'report.pdf');
+  assert.equal(part.data, PDF);
+  assert.equal(ext.chats.at(-1).text, 'summarise this');
+});
+
+test('an attachment with no question still carries text upstream', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({
+    messages: [{ role: 'user', content: [{ type: 'file', file: { filename: 'notes.csv', file_data: 'data:text/csv;base64,YSxiCg==' } }] }],
+  });
+  assert.equal(ext.chats.at(-1).text, '[notes.csv]', 'an empty composer is rejected upstream');
+});
+
+test('an unnamed document is given a name from its type', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'file', url: PDF }] }] });
+  assert.equal(ext.chats.at(-1).parts.find((p) => p.type === 'file').filename, 'attachment.pdf');
+});
+
+test('an image sent as a file part is still an image', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  const png = 'data:image/png;base64,iVBORw0KGgo=';
+  await post({ messages: [{ role: 'user', content: [{ type: 'text', text: 'what is this' }, { type: 'file', file: { filename: 'shot.png', file_data: png } }] }] });
+  const parts = ext.chats.at(-1).parts;
+  assert.ok(parts.some((p) => p.type === 'image' && p.image === png));
+  assert.ok(!parts.some((p) => p.type === 'file'), 'it must not be uploaded as a document');
+});
+
+test('an attachment of an unsupported type is refused, not forwarded', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'run this' }, { type: 'file', file: { filename: 'x.sh', file_data: 'data:application/x-sh;base64,ZWNobyBoaQo=' } }] }],
+  });
+  assert.ok(!ext.chats.at(-1).parts.some((p) => p.type === 'file'), 'an executable must not be uploaded');
+  assert.equal(ext.chats.at(-1).text, 'run this', 'the question still goes through');
+});
+
+test('a thinking level is checked against what the model advertises', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
+
+  // Opus is the only model that advertises max
+  await post({ model: 'claude-opus-5@azure', messages: [{ role: 'user', content: 'hi' }], thinking_level: 'max' });
+  assert.equal(ext.chats.at(-1).thinkingLevel, 'max');
+
+  await post({ model: 'claude-sonnet-5@default', messages: [{ role: 'user', content: 'hi' }], thinking_level: 'max' });
+  assert.equal(ext.chats.at(-1).thinkingLevel, undefined, 'sonnet does not offer max');
+
+  await post({ model: 'claude-sonnet-5@default', messages: [{ role: 'user', content: 'hi' }], thinking_level: 'high' });
+  assert.equal(ext.chats.at(-1).thinkingLevel, 'high');
+});

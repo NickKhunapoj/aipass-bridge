@@ -171,15 +171,48 @@ const stream = await openai.chat.completions.create({
 for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta?.content || "");
 ```
 
-Send an `image_url` content part and the bridge uploads the image to aipass and
-attaches it — vision works on models that support it.
+### Attachments
 
-Two extra fields go beyond the OpenAI schema, and both are ignored by clients
-that do not know them:
+Send an `image_url` content part and the bridge uploads the image to aipass and
+attaches it — vision works on models that support it. A `file` part does the
+same for a document:
+
+```python
+client.chat.completions.create(model="claude-sonnet-5@default", messages=[{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "What does this report conclude?"},
+        {"type": "file", "file": {"filename": "report.pdf", "file_data": data_uri}},
+    ],
+}])
+```
+
+`file_data` is a `data:` URI; a plain `https://` URL works too and is fetched by
+the bridge behind the SSRF guard, so the extension is never asked to fetch a URL
+with your cookies. PDF, Word, Excel, PowerPoint, `.txt`, `.md`, `.csv` and
+`.json` are accepted, up to 20 MB. Anything else is refused here rather than
+uploaded and rejected upstream, where the error is vaguer. An image sent as a
+`file` part is treated as an image, not a document.
+
+From the terminal:
+
+```bash
+npm run chat -- "summarise this" --file report.pdf
+npm run chat -- "compare these" --file q1.pdf --file q2.pdf
+```
+
+The file is read before the bridge is contacted, so a mistyped path is reported
+on its own. Attachments ride on the first message only — they stay in the
+conversation afterwards, and re-uploading them each turn would just spend
+credits.
+
+### Fields beyond the OpenAI schema
+
+Both are ignored by clients that do not know them:
 
 | field | values | effect |
 | --- | --- | --- |
-| `thinking_level` | `low`, `medium`, `high` | how long a reasoning model thinks before answering. Anything else is dropped rather than sent. |
+| `thinking_level` | `low`, `medium`, `high`, and `max` on Claude Opus | how long a reasoning model thinks before answering. The levels are per model — `GET /v1/models` reports each model's `thinking` — and a level the model does not advertise is dropped rather than sent. `npm run chat -- --thinking high`. |
 | `aspect_ratio` | `1:1`, `3:4`, `4:3` | the shape of a generated image (see [Generating an image](#generating-an-image)). |
 
 ## Scope, and why
