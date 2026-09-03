@@ -180,7 +180,7 @@ rather than forwarded when the chosen model does not accept it:
 | --- | --- | --- |
 | `thinking_level` | reasoning models | `low`, `medium`, `high`, and `max` on Claude Opus. Per model — `GET /v1/models` reports each model's `thinking` |
 | `aspect_ratio` | image and video | images `1:1`, `3:4`, `4:3`; video also `16:9`, `9:16`, and `21:9` on seedance |
-| `resolution` | video | `480p`, `720p` — seedance only; other video models declare none |
+| `resolution` | video | `480p`, `720p` — seedance only; other video models declare none. An account may be offered fewer than the model declares |
 | `duration` | video | seconds |
 | `camera_fixed` | video | boolean |
 | `generate_audio` | video | boolean |
@@ -717,12 +717,20 @@ have to guess:
 Only `seedance-2.0-fast` and `seedance-2.0-mini` declare resolutions
 (`480p`, `720p`); every other video model has none and the web UI shows no
 control for one, which is why the bridge drops a resolution those models never
-receive. The image limits differ too — veo takes a source image and up to three
+receive. The account can be offered fewer than the model declares — on the
+account this was checked against, the picker offers only `480p` — so the table
+is the ceiling, not a promise.
+
+The image limits differ too — veo takes a source image and up to three
 references, seedance takes up to nine reference images and no source image —
 and are reported for the same reason, though nothing sends them yet.
 
+**Durations are a short list, not a free number.** `seedance-2.0-mini` offers
+`4` and `6` seconds and the picker is a dropdown, so a value outside it is
+likely to be rejected upstream once the job has already been accepted.
+
 ```bash
-npm run chat -- --model seedance-2.0-mini --resolution 720p --duration 8 \
+npm run chat -- --model seedance-2.0-mini --resolution 480p --duration 6 \
   --camera-fixed --no-audio "a calm street in Bangkok at night"
 ```
 
