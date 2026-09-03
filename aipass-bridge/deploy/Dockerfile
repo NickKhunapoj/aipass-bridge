@@ -31,6 +31,9 @@ ENV DISPLAY=:99 \
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY start-browser.sh /app/start-browser.sh
 COPY start-vnc.sh /app/start-vnc.sh
-RUN chmod +x /app/start-browser.sh /app/start-vnc.sh 2>/dev/null || true
+# Docker Desktop can send Windows CRLF files in the build context. Normalize
+# these Linux entry scripts inside the image before Supervisor executes them.
+RUN sed -i 's/\r$//' /app/start-browser.sh /app/start-vnc.sh \
+    && chmod +x /app/start-browser.sh /app/start-vnc.sh
 
 CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

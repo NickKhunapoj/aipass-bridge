@@ -16,8 +16,9 @@ services:
       - ./chrome-data:/app/chrome-data      # the logged-in browser profile (gitignored)
       - ../extension:/app/extension:ro      # the unmodified core extension
       - ../bridge:/app/bridge:ro            # the unmodified core bridge
-      - ./start-browser.sh:/app/start-browser.sh:ro
-      - ./start-vnc.sh:/app/start-vnc.sh:ro
+      # Startup scripts stay inside the Linux image. Binding Windows copies
+      # here changes their line endings and prevents Supervisor from launching
+      # x11vnc/Chromium (ENOENT / exit 127).
       - ./supervisord.conf:/etc/supervisor/conf.d/supervisord.conf:ro
       - ./.env:/app/.env:ro
     environment:
