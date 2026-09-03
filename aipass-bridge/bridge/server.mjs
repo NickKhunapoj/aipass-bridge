@@ -102,27 +102,55 @@ const LOADERS = {
   quota: '/loaders/get-usage-quota',
 };
 
-// list-models carries no field separating chat models from image/video/audio
-// generators, so exclude those by id. AIPASS_MODEL_FILTER=all keeps them.
-// The loader carries no category field — the tabs in the web UI (สนทนา,
+// list-models carries no category field — the tabs in the web UI (สนทนา,
 // สร้างรูปภาพ, สร้างวิดีโอ, สร้างเพลง, ค้นคว้าเชิงลึก) are built client-side, so
-// the grouping has to be derived here. Each rule below is annotated with the
-// models it actually catches in the live list, so it can be checked against a
-// fresh capture rather than trusted.
-const KINDS = [
-  // seedream-4.0, seedream-5.0-lite, gpt-image-2, gemini-3-pro-image, gemini-2.5-flash-image
-  ['image', /seedream|gpt-image|-image$|image-preview/i],
-  // veo-3.1-fast-generate-001, seedance-2.0{,-fast,-mini}
-  ['video', /^veo-|seedance/i],
-  // lyria-3-pro-preview, lyria-3-clip-preview
+// the grouping has to be made here. These lists are the app's own, lifted
+// verbatim from its bundle rather than guessed, and include ids the account
+// cannot currently see — a model that appears later is then already classified.
+const KIND_IDS = {
+  image: ['gemini-2.5-flash-image', 'gemini-3.1-flash-image', 'gemini-3.1-flash-lite-image',
+    'gemini-3-pro-image', 'FLUX.2-pro', 'gpt-image-2', 'seedream-4.0', 'seedream-4.5',
+    'seedream-5.0-lite', 'flux2-klein-4b@jts', 'mock-remote-image'],
+  video: ['veo-3.0-generate-001', 'veo-3.1-generate-001', 'veo-3.1-fast-generate-001', 'sora-2',
+    'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini', 'wan2.2@jts', 'mock-remote-video'],
+  music: ['lyria-3-clip-preview', 'lyria-3-pro-preview'],
+  research: ['gemini-2.5-pro-deep-research', 'openai-deep-research', 'sonar-deep-research',
+    'mock-remote-deep-research'],
+};
+const KIND_BY_ID = new Map(Object.entries(KIND_IDS).flatMap(([kind, ids]) => ids.map((id) => [id, kind])));
+
+// A model the lists have never heard of still has to land somewhere, so the old
+// name-shaped rules stay as a fallback for anything new.
+const KIND_PATTERNS = [
+  ['image', /seedream|gpt-image|flux|-image$|image-preview/i],
+  ['video', /^veo-|seedance|^sora-|^wan\d/i],
   ['music', /lyria/i],
-  // openai-deep-research, sonar-deep-research. Plain sonar and
-  // sonar-reasoning-pro stay under chat: they answer conversationally and only
-  // search the web on the way, which is not what the deep-research tab holds.
   ['research', /deep-research/i],
 ];
 
-const kindOf = (id) => KINDS.find(([, re]) => re.test(id))?.[0] ?? 'chat';
+const kindOf = (id) => KIND_BY_ID.get(id) ?? KIND_PATTERNS.find(([, re]) => re.test(id))?.[0] ?? 'chat';
+
+// Which video models accept a resolution, and which. The app gates only this
+// one option by model — everything else it sends whenever the caller set it —
+// so the bridge mirrors that rather than inventing stricter rules.
+const VIDEO_RESOLUTIONS = {
+  'seedance-2.0-fast': ['480p', '720p'],
+  'seedance-2.0-mini': ['480p', '720p'],
+};
+
+// How many images a video model will take alongside the prompt, and in which
+// role. Not used to send anything yet; reported on /v1/models so a client can
+// see what the model would accept.
+const VIDEO_IMAGE_LIMITS = {
+  'veo-3.0-generate-001': { maximumImages: 1, sourceImage: true, referenceImages: false },
+  'veo-3.1-generate-001': { maximumImages: 3, sourceImage: true, referenceImages: true },
+  'veo-3.1-fast-generate-001': { maximumImages: 3, sourceImage: true, referenceImages: true },
+  'sora-2': { maximumImages: 1, sourceImage: true, referenceImages: false },
+  'seedance-2.0': { maximumImages: 9, sourceImage: false, referenceImages: true },
+  'seedance-2.0-fast': { maximumImages: 9, sourceImage: false, referenceImages: true },
+  'seedance-2.0-mini': { maximumImages: 9, sourceImage: false, referenceImages: true },
+  'wan2.2@jts': { maximumImages: 1, sourceImage: true, referenceImages: false },
+};
 
 // 'all' is the default: an image model you cannot see is one you cannot select.
 // Set AIPASS_MODEL_FILTER=chat to get only the models a text client can drive.
@@ -151,6 +179,19 @@ function extractModels(decoded) {
         isDefault: v.isDefault === true,
         thinking: Array.isArray(v.thinkingConfig?.supportedLevels) ? v.thinkingConfig.supportedLevels : null,
         media: kind !== 'chat' && kind !== 'research',
+        // What this model will actually take beyond a prompt. Only video has a
+        // surface worth reporting; everything else is uniform.
+        options: kind === 'video'
+          ? {
+              aspectRatio: true,
+              stylePreprompt: true,
+              duration: true,
+              cameraFixed: true,
+              generateAudio: true,
+              resolutions: VIDEO_RESOLUTIONS[id] ?? null,
+              images: VIDEO_IMAGE_LIMITS[id] ?? null,
+            }
+          : null,
       });
     }
     Object.values(v).forEach(walk);
@@ -175,7 +216,7 @@ const sendToClient = (client, event, data) =>
   client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
 class Job {
-  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, timeoutMs, onDelta, onDone, onError }) {
+  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, video, timeoutMs, onDelta, onDone, onError }) {
     this.id = randomUUID();
     this.kind = kind;
     this.url = url;
@@ -185,6 +226,7 @@ class Job {
     this.assistantField = assistantField;
     this.temporary = temporary;
     this.thinkingLevel = thinkingLevel;
+    this.video = video;
     this.timeoutMs = timeoutMs ?? IDLE_TIMEOUT_MS;
     this.modelId = modelId;
     this.text = text;
@@ -210,6 +252,8 @@ class Job {
       ? { jobId: this.id, kind: 'loader', url: this.url }
       : this.kind === 'create'
       ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField, temporary: this.temporary }
+      : this.kind === 'video'
+      ? { jobId: this.id, kind: 'video', conversationId: this.conversationId, modelId: this.modelId, text: this.text, ...this.video }
       : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel });
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
@@ -408,7 +452,11 @@ async function resolveConversation() {
 
 // A 404 means the conversation was deleted; a 409 means the server still
 // believes a generation is running there. Neither recovers on its own.
-function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, onDelta, onDone, onError }) {
+function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, video, onDelta, onDone, onError }) {
+  // A video model does not go through /actions/send-message at all — it is a
+  // job submitted to /actions/video-generation and then polled. Same Job
+  // machinery, different kind, so retries and aborts behave the same way.
+  const isVideo = kindOf(modelId) === 'video';
   let attempts = 0;
   let delivered = 0;
   let current = null;
@@ -420,8 +468,10 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, on
     catch (err) { return onError(err.message); }
 
     current = new Job({
+      kind: isVideo ? 'video' : 'chat',
       modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel,
       temporary: conversationIsTemporary,
+      video: isVideo ? { ...video, aspectRatio: video?.aspectRatio ?? ratio } : undefined,
       timeoutMs: ['video', 'music'].includes(kindOf(modelId)) ? MEDIA_TIMEOUT_MS : IDLE_TIMEOUT_MS,
       onDelta: (part) => { delivered++; onDelta(part); },
       onDone,
@@ -663,6 +713,37 @@ const oaiError = (res, status, message, type = 'invalid_request_error') =>
 
 /* ---------------------------------------------------------- chat completions */
 
+// The video options a request may carry, filtered to what the model will take.
+// The app gates only `resolution` by model and sends the rest whenever they are
+// set, so this does the same rather than inventing stricter rules of its own.
+function videoOptionsFor(modelId, payload) {
+  if (kindOf(modelId) !== 'video') return undefined;
+  const model = cachedModels().find((m) => m.id === modelId);
+  const bool = (v) => (typeof v === 'boolean' ? v : undefined);
+  // A model absent from the table has no resolution concept at all — the web UI
+  // shows no control for it and never puts one on the wire. The app's own guard
+  // is looser (it passes anything for an unlisted model) but only because the UI
+  // has already constrained the choice; matching the wire is what matters here.
+  const resolution = String(payload.resolution ?? '').trim();
+  const allowed = VIDEO_RESOLUTIONS[modelId];
+  if (resolution && !allowed?.includes(resolution)) {
+    log(`warning: ${modelId} does not offer resolution ${resolution}${allowed ? ` (${allowed.join(', ')})` : ''}`);
+  }
+  const duration = Number(payload.duration);
+  return {
+    // The submit route wants the provider id, which is the model's own.
+    provider: model?.providerId ?? undefined,
+    ...(payload.aspect_ratio || payload.aspectRatio ? { aspectRatio: String(payload.aspect_ratio ?? payload.aspectRatio) } : {}),
+    // A style is sent as its preprompt text, not as an id: the app looks the
+    // preset up in /loaders/list-video-styles and posts the `preprompt` field.
+    ...(payload.style_preprompt || payload.stylePreprompt ? { stylePreprompt: String(payload.style_preprompt ?? payload.stylePreprompt) } : {}),
+    ...(resolution && allowed?.includes(resolution) ? { resolution } : {}),
+    ...(Number.isFinite(duration) && duration > 0 ? { duration } : {}),
+    ...(bool(payload.camera_fixed ?? payload.cameraFixed) !== undefined ? { cameraFixed: bool(payload.camera_fixed ?? payload.cameraFixed) } : {}),
+    ...(bool(payload.generate_audio ?? payload.generateAudio) !== undefined ? { generateAudio: bool(payload.generate_audio ?? payload.generateAudio) } : {}),
+  };
+}
+
 // Chat completions have no field for generated media, so it goes into the
 // content as markdown — which every client already renders. An image gets an
 // image tag; a video or a music clip gets a link, because an mp4 in an image
@@ -694,6 +775,7 @@ async function chatCompletions(req, res) {
   // decide. A level the model does not list is dropped rather than sent.
   const thinking = String(payload.thinking_level ?? payload.thinkingLevel ?? '').trim().toLowerCase();
   const thinkingLevel = thinking ? thinkingLevelFor(model, thinking) : undefined;
+  const video = videoOptionsFor(model, payload);
   if (thinking && !thinkingLevel) log(`warning: ${model} does not offer thinking level ${thinking}`);
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
@@ -720,7 +802,7 @@ async function chatCompletions(req, res) {
     emit({ role: 'assistant', content: '' });
 
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, video,
       onDelta: (part) => {
         if (part.kind === 'status') {
           if (TOOL_VISIBILITY === 'off') return;
@@ -751,7 +833,7 @@ async function chatCompletions(req, res) {
   let reasoning = '';
   await new Promise((resolve) => {
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, video,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
         if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text, p.filename); return; }
@@ -873,6 +955,7 @@ const server = http.createServer(async (req, res) => {
           id: m.id, object: 'model', created: 0, owned_by: m.provider ?? 'aipass',
           name: m.name, free_credit: m.free, thinking: m.thinking,
           kind: m.kind, description: m.description, is_default: m.isDefault,
+          ...(m.options ? { options: m.options } : {}),
         })),
       });
     }

@@ -118,7 +118,8 @@ test('?kind narrows the list the way the web UI tabs do', async () => {
   assert.deepEqual(images.data.map((m) => m.id).sort(), ['gemini-3-pro-image', 'gpt-image-2']);
 
   const both = await (await fetch(`${bridge.base}/v1/models?kind=image,video`)).json();
-  assert.equal(both.data.length, 3);
+  assert.deepEqual(both.data.map((m) => m.id).sort(),
+    ['gemini-3-pro-image', 'gpt-image-2', 'seedance-2.0-mini', 'veo-3.1-fast-generate-001']);
   await ext.disconnect();
 });
 
@@ -615,4 +616,61 @@ test('a video part is labelled with the filename it carries', async (t) => {
   assert.match(content, /\[01a065f9-b680-70ee-9b8b-9af350dd4fd7\.mp4\]\(https:\/\/storage\.googleapis\.com\//);
   assert.ok(content.includes('X-Goog-Signature=ace3722b'), 'the signature must survive or the link is dead');
   assert.match(content, /Generated video from prompt/, 'the text part rides alongside the file');
+});
+
+test('a video model is submitted as a job, not sent as a chat', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
+
+  await post({ model: 'seedance-2.0-mini', messages: [{ role: 'user', content: 'a street at night' }] });
+  const job = ext.videos.at(-1);
+  assert.ok(job, 'a video model must not go through /actions/send-message');
+  assert.equal(job.kind, 'video');
+  assert.equal(job.text, 'a street at night');
+  assert.equal(job.provider, 'byteplus', 'the submit route wants the provider id');
+
+  await post({ model: 'gemini-3.1-flash-lite', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(ext.videos.length, 1, 'a chat model must still stream');
+});
+
+test('video options are passed through, and resolution is gated by model', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
+
+  await post({
+    model: 'seedance-2.0-mini', messages: [{ role: 'user', content: 'a street' }],
+    aspect_ratio: '9:16', resolution: '720p', duration: 8,
+    camera_fixed: true, generate_audio: false,
+    style_preprompt: 'Documentary style, natural camera work.',
+  });
+  const job = ext.videos.at(-1);
+  assert.equal(job.aspectRatio, '9:16');
+  assert.equal(job.resolution, '720p');
+  assert.equal(job.duration, 8);
+  assert.equal(job.cameraFixed, true);
+  assert.equal(job.generateAudio, false, 'false must survive, not be dropped as falsy');
+  assert.equal(job.stylePreprompt, 'Documentary style, natural camera work.');
+
+  // veo lists no resolutions, so the app never sends one
+  await post({ model: 'veo-3.1-fast-generate-001', messages: [{ role: 'user', content: 'a street' }], resolution: '1080p' });
+  assert.equal(ext.videos.at(-1).resolution, undefined, 'veo takes no resolution');
+
+  // seedance takes 480p and 720p only
+  await post({ model: 'seedance-2.0-mini', messages: [{ role: 'user', content: 'a street' }], resolution: '4k' });
+  assert.equal(ext.videos.at(-1).resolution, undefined, '4k is not on the list');
+});
+
+test('models report the option surface each one actually accepts', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
+
+  const all = (await (await fetch(`${bridge.base}/v1/models`)).json()).data;
+  const byId = Object.fromEntries(all.map((m) => [m.id, m]));
+  assert.deepEqual(byId['seedance-2.0-mini'].options.resolutions, ['480p', '720p']);
+  assert.equal(byId['veo-3.1-fast-generate-001'].options.resolutions, null, 'veo offers no resolution');
+  assert.deepEqual(byId['seedance-2.0-mini'].options.images, { maximumImages: 9, sourceImage: false, referenceImages: true });
+  assert.equal(byId['gemini-3.1-flash-lite'].options, undefined, 'a chat model has no video surface');
 });
