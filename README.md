@@ -23,13 +23,14 @@ your terminal ──▶ OpenAI-compatible API on localhost:8787 ──▶ a real
 ```
 
 - **Chat from the terminal**, streaming, with web search and sources.
-- **Every model the account has** — 34 of them, including the image, video and
-  music generators, grouped the way the web UI groups them.
+- **Every model the account can pick** — 33 of them, including the image, video
+  and music generators, grouped the way the web UI groups them.
 - **Generate images** — pick an image model, get a PNG
   ([example](aipass-bridge/README.md#a-worked-example)).
 - **Attach documents** — `--file report.pdf`, and ask about it.
 - **Video and music too** — Seedance, Veo and Lyria, saved to disk like images
-  ([clip](aipass-bridge/README.md#video-from-a-real-run)).
+  ([clip](aipass-bridge/README.md#video-from-a-real-run)). Video is a polled job
+  upstream, not a stream, and the bridge hides that difference.
 - **Edit local files** — an agent that reads, searches, and edits a project you point it at.
 - **See what it costs** — the credit pool, in the popup and after every agent run.
 - **Drop-in OpenAI endpoint** — point the `openai` SDK, or any tool that takes a base URL, at it.
@@ -54,6 +55,7 @@ npm run doctor                                     # is every link working?
 npm run chat -- "ช่วยสรุปข่าว AI วันนี้"         # chat, streaming
 npm run chat -- "แมวน่ารัก" --model gpt-image-2   # generate an image
 npm run chat -- "summarise this" --file report.pdf # ask about a document
+npm run chat -- "a street at night" --model seedance-2.0-mini  # generate a video
 npm run agent -- "add a /health route" --root .    # edit local files (dry run)
 npm run models                                     # everything, by category
 npm run credits                                    # what is left of the pool
@@ -81,9 +83,9 @@ client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="sk-dummy")
 
 ## Docs
 
-**→ [Full documentation](aipass-bridge/README.md)** — setup, the coding assistant, the
-agent's action set, models and image generation, credits, conversations,
-configuration, and tests.
+**→ [Full documentation](aipass-bridge/README.md)** — setup, the coding assistant
+and its action set, conversations, models, generating images / video / music,
+credits, configuration, troubleshooting, and tests.
 
 **→ [Headless deployment](aipass-bridge/deploy/README.md)** — Docker + noVNC, for
 running it 24/7 on a server.

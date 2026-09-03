@@ -64,6 +64,7 @@ if (!task || HELP) {
   --allow-run     let the agent run shell commands   (default: off)
   --max N         max steps                          (default: 10)
   --max-result N  truncate each tool result          (default: 3000 bytes)
+  --slim          send only the task, without the built-in preamble
   --watch         stay open for follow-up tasks on the same conversation
   --reuse         continue the most recent conversation instead of a new one
   --permanent     keep the run's conversation in chat history (default: temporary)
