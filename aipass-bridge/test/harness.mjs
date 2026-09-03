@@ -88,6 +88,17 @@ export const conversationsFixture = (conversations) => encodeTurboStream({
   'routes/loaders/list-converstaions': { data: { conversations, gatewayFlash: null } },
 });
 
+export const foldersFixture = (folders) => encodeTurboStream({
+  'routes/loaders/list-folders': { data: { folders } },
+});
+
+// The folder UI job is extension-owned and returns plain JSON, unlike AiPASS
+// loaders and conversation creation which return turbo-stream arrays.
+export const createFolderFixture = (requestId, name) => JSON.stringify({
+  folderId: `folder-${requestId.replace(/-/g, '').slice(0, 16)}`,
+  name,
+});
+
 // The real response derives the id from the first 16 hex characters of the
 // clientCreateRequestId, so the fake does the same.
 export const createFixture = (requestId, initialMessage) => encodeTurboStream({
@@ -158,14 +169,18 @@ const DEFAULT_CONVERSATIONS = [
 // Stands in for the extension. `onChat` receives the job plus an emitter and
 // decides what the upstream would have streamed back.
 export class FakeExtension {
-  constructor(base, { onChat, models = DEFAULT_MODELS, conversations = DEFAULT_CONVERSATIONS, quota = quotaFixture() } = {}) {
+  constructor(base, { onChat, models = DEFAULT_MODELS, conversations = DEFAULT_CONVERSATIONS, folders = [], folderError = '', rejectedFolderIds = [], quota = quotaFixture() } = {}) {
     this.base = base;
     this.quota = quota;
     this.onChat = onChat ?? (async (_job, e) => { await e.text('ok'); await e.done(); });
     this.models = models;
     this.conversations = conversations;
+    this.folders = folders;
+    this.folderError = folderError;
+    this.rejectedFolderIds = new Set(rejectedFolderIds);
     this.chats = [];       // every chat job received
     this.created = [];     // every create-conversation job received
+    this.createdFolders = [];
     this.loaders = [];     // every loader url received
   }
 
@@ -226,6 +241,9 @@ export class FakeExtension {
   async #handle(job) {
     if (job.kind === 'create') {
       this.created.push(job);
+      if (this.rejectedFolderIds.delete(job.folderId)) {
+        return void this.post('/ext/loader', { jobId: job.jobId, message: 'aipass returned 404 Folder not found' });
+      }
       const raw = job.temporary
         ? temporaryChatFixture()
         : createFixture(job.requestId, job.message);
@@ -235,10 +253,19 @@ export class FakeExtension {
       this.loaders.push(job.url);
       const raw = job.url.includes('get-usage-quota')
         ? this.quota
+        : job.url.includes('list-folders')
+        ? foldersFixture(this.folders)
         : job.url.includes('list-conversations')
         ? conversationsFixture(this.conversations)
         : modelsFixture(this.models);
       return void this.post('/ext/loader', { jobId: job.jobId, raw });
+    }
+    if (job.kind === 'folder') {
+      this.createdFolders.push(job);
+      if (this.folderError) return void this.post('/ext/loader', { jobId: job.jobId, message: this.folderError });
+      const id = `folder-${job.jobId.replace(/-/g, '').slice(0, 16)}`;
+      this.folders.push({ id, name: job.name });
+      return void this.post('/ext/loader', { jobId: job.jobId, raw: createFolderFixture(job.jobId, job.name) });
     }
     this.chats.push(job);
     const emit = {

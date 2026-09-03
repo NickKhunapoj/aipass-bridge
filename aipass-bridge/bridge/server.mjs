@@ -19,6 +19,9 @@ const MODELS_FALLBACK = (process.env.AIPASS_MODELS ?? 'gemini-3.1-flash-lite,cla
 // 'reasoning' -> delta.reasoning_content, 'text' -> inline, 'off' -> dropped.
 const TOOL_VISIBILITY = process.env.AIPASS_TOOL_VISIBILITY ?? 'reasoning';
 const PINNED_CONVERSATION = process.env.AIPASS_CONVERSATION_ID ?? '';
+const PER_REQUEST_CONVERSATIONS = process.env.AIPASS_PER_REQUEST_CONVERSATIONS !== '0';
+const BRIDGE_FOLDER_NAME = process.env.AIPASS_FOLDER_NAME ?? 'AIPass-Bridge';
+const CONFIGURED_FOLDER_ID = process.env.AIPASS_FOLDER_ID ?? '';
 const IDLE_TIMEOUT_MS = Number(process.env.AIPASS_IDLE_TIMEOUT_MS ?? 180_000);
 // Rendering a video or a music clip can go quiet for minutes at a stretch. The
 // timeout is on silence, not on total time, but three minutes of it is normal
@@ -98,6 +101,7 @@ function decodeTurboStream(text) {
 const LOADERS = {
   models: '/loaders/list-models.data?_routes=routes%2Floaders%2Flist-models',
   conversations: '/loaders/list-conversations.data?_routes=routes%2Floaders%2Flist-converstaions',
+  folders: '/loaders/list-folders.data?_routes=routes%2Floaders%2Flist-folders',
   // Unlike the other two this one answers with plain JSON and takes no _routes
   // parameter, so it is parsed rather than turbo-stream decoded.
   quota: '/loaders/get-usage-quota',
@@ -176,7 +180,7 @@ const sendToClient = (client, event, data) =>
   client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
 class Job {
-  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, timeoutMs, onDelta, onDone, onError }) {
+  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, folderId, folderName, thinkingLevel, timeoutMs, onDelta, onDone, onError }) {
     this.id = randomUUID();
     this.kind = kind;
     this.url = url;
@@ -185,6 +189,8 @@ class Job {
     this.assistant = assistant;
     this.assistantField = assistantField;
     this.temporary = temporary;
+    this.folderId = folderId;
+    this.folderName = folderName;
     this.thinkingLevel = thinkingLevel;
     this.timeoutMs = timeoutMs ?? IDLE_TIMEOUT_MS;
     this.modelId = modelId;
@@ -211,12 +217,20 @@ class Job {
     sendToClient(client, 'job', this.kind === 'loader'
       ? { jobId: this.id, kind: 'loader', url: this.url }
       : this.kind === 'create'
-      ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField, temporary: this.temporary }
+      ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField, temporary: this.temporary, folderId: this.folderId }
+      : this.kind === 'folder'
+      ? { jobId: this.id, kind: 'folder', name: this.folderName }
       : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel });
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
   done(value) { if (this.settled) return; logger.debug('job', `done · kind=${this.kind} result=${value ?? 'stop'}`); this.cleanup(); this.onDone(value ?? 'stop'); }
-  fail(message) { if (this.settled) return; logger.warn('job', `failed · kind=${this.kind} ${message}`); this.cleanup(); this.onError(message); }
+  fail(message) {
+    if (this.settled) return;
+    const auth = String(message).includes('AIPASS_AUTH_REQUIRED:');
+    logger.warn(auth ? 'auth' : 'job', `failed · kind=${this.kind} ${message}`);
+    this.cleanup();
+    this.onError(message);
+  }
   abort() {
     if (this.settled) return;
     if (this.client) sendToClient(this.client, 'abort', { jobId: this.id });
@@ -334,6 +348,8 @@ let conversationCache = null;
 let conversationIsTemporary = false;
 let conversationList = [];
 let conversationIndex = 0;
+let bridgeFolderId = CONFIGURED_FOLDER_ID;
+let bridgeFolderPromise = null;
 
 async function loadConversations() {
   if (!extClients.size) throw new Error('no extension connected — cannot look up a conversation');
@@ -362,34 +378,141 @@ function findValue(node, key) {
   return null;
 }
 
+const FOLDER_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
+// A folder can be supplied as the id that the chat form expects or as either
+// UI URL AiPASS exposes: /folder/<id> and /chat?folderId=<id>. Keeping this in
+// the runtime config lets a user copy the visible browser URL without putting
+// account-specific data in source control.
+function folderIdFromConfig(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('folderId must be an AiPASS folder id or folder URL');
+  const raw = value.trim();
+  let id = raw;
+  if (/^https?:\/\//i.test(raw)) {
+    const url = new URL(raw);
+    if (url.hostname !== 'de.aipass.net') throw new Error('folder URL must point to de.aipass.net');
+    id = url.searchParams.get('folderId') ?? url.pathname.match(/^\/folder\/([^/]+)\/?$/)?.[1] ?? '';
+  }
+  if (!FOLDER_ID.test(id)) throw new Error('folder id is not a valid UUID');
+  return id;
+}
+
+function decodePayload(raw) {
+  const parsed = JSON.parse(raw);
+  // AiPASS loaders use a flat turbo-stream array, while extension-owned UI
+  // jobs return ordinary JSON. decodeTurboStream accepts an object without
+  // throwing but resolves it to undefined, so shape-check before decoding.
+  return Array.isArray(parsed) ? decodeTurboStream(raw) : parsed;
+}
+
+function findNamedFolder(node, name) {
+  if (Array.isArray(node)) {
+    for (const value of node) { const hit = findNamedFolder(value, name); if (hit) return hit; }
+    return null;
+  }
+  if (!node || typeof node !== 'object') return null;
+  if (typeof node.id === 'string' && [node.name, node.folderName, node.title].some((value) => value === name)) return node.id;
+  for (const value of Object.values(node)) { const hit = findNamedFolder(value, name); if (hit) return hit; }
+  return null;
+}
+
+async function createFolder(name) {
+  const raw = await new Promise((resolve, reject) => {
+    const job = new Job({
+      kind: 'folder', folderName: name, timeoutMs: 30_000,
+      onDelta: () => {}, onDone: resolve, onError: (message) => reject(new Error(message)),
+    });
+    job.dispatch();
+  });
+  const decoded = decodePayload(raw);
+  const id = findNamedFolder(decoded, name) ?? findValue(decoded, 'folderId') ?? findValue(decoded, 'id');
+  if (!id) throw new Error(`could not read the ${name} folder id from the response`);
+  logger.info('folder', `created · name=${name} id=${id}`);
+  return id;
+}
+
+async function ensureBridgeFolder() {
+  if (bridgeFolderId) return bridgeFolderId;
+  if (bridgeFolderPromise) return bridgeFolderPromise;
+  bridgeFolderPromise = (async () => {
+    try {
+      const existing = findNamedFolder(decodePayload(await fetchLoader(LOADERS.folders)), BRIDGE_FOLDER_NAME);
+      if (existing) {
+        bridgeFolderId = existing;
+        logger.info('folder', `selected · name=${BRIDGE_FOLDER_NAME} id=${existing}`);
+        return existing;
+      }
+    } catch (err) {
+      // Folder lookup is advisory. The create action is the source of truth and
+      // returns the existing folder when AiPASS already has this exact name.
+      logger.warn('folder', `lookup failed · ${String(err?.message ?? err).slice(0, 160)}`);
+    }
+    bridgeFolderId = await createFolder(BRIDGE_FOLDER_NAME);
+    return bridgeFolderId;
+  })().finally(() => { bridgeFolderPromise = null; });
+  return bridgeFolderPromise;
+}
+
+// Folder placement is mandatory for the isolated API mode. Never fall back to
+// an unfiled chat: callers asked for vendor-style isolation *inside* this
+// folder, and silently losing that association makes the result misleading.
+async function folderForNewConversation() {
+  if (!BRIDGE_FOLDER_NAME) throw new Error('AIPASS_FOLDER_NAME is empty; a folder is required for new API conversations');
+  return ensureBridgeFolder();
+}
+
 // The chat page creates a conversation by posting its first message to
 // /chat.data; the server derives the id from clientCreateRequestId.
 // `temporary: true` posts intent=create-temporary-chat instead. The server
 // mints a conversation that never appears in the account's history and expires
 // on its own — which is what an agent run wants: nothing to clean up, nothing
 // to rotate past, and no earlier conversation to inherit.
-async function createConversation({ modelId = defaultModel, message = 'Hello', assistant, temporary = false } = {}) {
+async function createConversation({ modelId = defaultModel, message = '', assistant, temporary = false, folderId = '', adopt = true } = {}) {
   const requestId = randomUUID();
   const raw = await new Promise((resolve, reject) => {
     const job = new Job({
-      kind: 'create', modelId, message, requestId, temporary,
+      kind: 'create', modelId, message, requestId, temporary, folderId,
       assistant: assistant ?? assistantId, assistantField: ASSISTANT_FIELD,
       timeoutMs: 30_000,
       onDelta: () => {}, onDone: resolve, onError: (m) => reject(new Error(m)),
     });
     job.dispatch();
   });
-  const decoded = decodeTurboStream(raw);
+  const decoded = decodePayload(raw);
   // create-conversation answers with conversationId; create-temporary-chat
   // answers with the conversation object, whose id lives under `id`.
   const id = findValue(decoded, 'conversationId') ?? findValue(decoded, 'id');
   if (!id) throw new Error(`could not read a conversation id from the response: ${raw.slice(0, 200)}`);
-  conversationCache = id;
-  conversationIsTemporary = Boolean(temporary);
-  conversationIndex = 0;
-  conversationList = [];
-  logger.info('conversation', `created · ${temporary ? 'temporary ' : ''}${id}`);
+  if (adopt) {
+    conversationCache = id;
+    conversationIsTemporary = Boolean(temporary);
+    conversationIndex = 0;
+    conversationList = [];
+  }
+  logger.info('conversation', `created · ${temporary ? 'temporary ' : ''}${id}${folderId ? ` folder=${folderId}` : ''}`);
   return id;
+}
+
+function isRejectedFolderError(err) {
+  const message = String(err?.message ?? err);
+  return /returned (?:400|404)\b|folder[^\n]*(?:not found|invalid|deleted|does not exist)/i.test(message);
+}
+
+// A folder can be deleted while this process still has its id cached. When
+// AiPASS rejects that id, discard only that stale cache entry, resolve the
+// named folder again through the authenticated browser UI, and retry once.
+// The retry always has a folder id; there is deliberately no unfiled fallback.
+async function createConversationInBridgeFolder(options = {}) {
+  const rejectedFolderId = await folderForNewConversation();
+  try {
+    return await createConversation({ ...options, folderId: rejectedFolderId });
+  } catch (err) {
+    if (!isRejectedFolderError(err)) throw err;
+    logger.warn('folder', `cached id rejected · id=${rejectedFolderId}; resolving ${BRIDGE_FOLDER_NAME} again`);
+    if (bridgeFolderId === rejectedFolderId) bridgeFolderId = '';
+    const resolvedFolderId = await folderForNewConversation();
+    return createConversation({ ...options, folderId: resolvedFolderId });
+  }
 }
 
 async function resolveConversation() {
@@ -408,28 +531,43 @@ async function resolveConversation() {
 
 /* --------------------------------------------------------------- chat flow */
 
-// A 404 means the conversation was deleted; a 409 means the server still
-// believes a generation is running there. Neither recovers on its own.
-function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, onDelta, onDone, onError }) {
+// By default every Chat Completions request gets its own upstream chat. That
+// matches vendor API semantics: no prior request can leak history into the
+// next one. Set AIPASS_PER_REQUEST_CONVERSATIONS=0 only for the legacy mode.
+function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, reuseConversation = false, onDelta, onDone, onError }) {
   let attempts = 0;
   let delivered = 0;
   let current = null;
+  let cancelled = false;
+  const isolated = PER_REQUEST_CONVERSATIONS && !reuseConversation;
 
   const attempt = async () => {
     attempts++;
     let conversationId;
-    try { conversationId = await resolveConversation(); }
+    let temporary = false;
+    try {
+      if (isolated) {
+        // AiPASS's create route needs a message field even for an empty chat.
+        // An empty value creates the conversation without a fake “Hello” turn;
+        // the actual API message is sent exactly once by the chat job below.
+        conversationId = await createConversationInBridgeFolder({ modelId, message: '', adopt: false });
+      } else {
+        conversationId = await resolveConversation();
+        temporary = conversationIsTemporary;
+      }
+    }
     catch (err) { return onError(err.message); }
+    if (cancelled) return;
 
     current = new Job({
       modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel,
-      temporary: conversationIsTemporary,
+      temporary,
       timeoutMs: ['video', 'music'].includes(kindOf(modelId)) ? MEDIA_TIMEOUT_MS : IDLE_TIMEOUT_MS,
       onDelta: (part) => { delivered++; onDelta(part); },
       onDone,
       onError: (message) => {
         const rejected = /conversation not found|returned 404|returned 409/i.test(message);
-        if (rejected && attempts <= 3 && delivered === 0 && !PINNED_CONVERSATION) {
+        if (rejected && !isolated && attempts <= 3 && delivered === 0 && !PINNED_CONVERSATION) {
           logger.warn('conversation', `rejected · ${conversationId}; trying the next one`);
           conversationIndex++;
           conversationCache = null;
@@ -443,7 +581,7 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, on
   };
 
   attempt();
-  return { abort: () => current?.abort() };
+  return { abort: () => { cancelled = true; current?.abort(); } };
 }
 
 // True for loopback, link-local and RFC1918 addresses. A bare domain name is
@@ -691,6 +829,7 @@ async function chatCompletions(req, res) {
   // decide. A level the model does not list is dropped rather than sent.
   const thinking = String(payload.thinking_level ?? payload.thinkingLevel ?? '').trim().toLowerCase();
   const thinkingLevel = thinking ? thinkingLevelFor(model, thinking) : undefined;
+  const reuseConversation = payload.aipass_reuse_conversation === true;
   if (thinking && !thinkingLevel) logger.warn('chat', `${model} does not offer thinking level ${thinking}`);
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
@@ -717,7 +856,7 @@ async function chatCompletions(req, res) {
     emit({ role: 'assistant', content: '' });
 
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, reuseConversation,
       onDelta: (part) => {
         if (part.kind === 'status') {
           if (TOOL_VISIBILITY === 'off') return;
@@ -748,7 +887,7 @@ async function chatCompletions(req, res) {
   let reasoning = '';
   await new Promise((resolve) => {
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, reuseConversation,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
         if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text); return; }
@@ -876,9 +1015,11 @@ const server = http.createServer(async (req, res) => {
 
     if (path === '/conversations/new' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
-      const id = await createConversation({
+      const temporary = body.temporary === true;
+      const create = temporary ? createConversation : createConversationInBridgeFolder;
+      const id = await create({
         modelId: body.model, message: body.message, assistant: body.assistant,
-        temporary: body.temporary === true,
+        temporary,
       });
       return json(res, 200, { id, temporary: conversationIsTemporary });
     }
@@ -901,6 +1042,13 @@ const server = http.createServer(async (req, res) => {
         aspectRatio = body.aspectRatio.trim();
         logger.info('config', `aspect ratio · ${aspectRatio}`);
       }
+      const hasFolderConfig = Object.hasOwn(body, 'folderId') || Object.hasOwn(body, 'folderUrl');
+      if (hasFolderConfig) {
+        const rawFolder = Object.hasOwn(body, 'folderId') ? body.folderId : body.folderUrl;
+        bridgeFolderId = rawFolder == null ? '' : folderIdFromConfig(rawFolder);
+        bridgeFolderPromise = null;
+        logger.info('folder', bridgeFolderId ? `configured · name=${BRIDGE_FOLDER_NAME} id=${bridgeFolderId}` : 'configuration cleared');
+      }
       if (body.conversation === null || typeof body.conversation === 'string') {
         // Pinning an id says nothing about how it was created, so it is treated
         // as an ordinary conversation unless the caller declares otherwise.
@@ -910,7 +1058,7 @@ const server = http.createServer(async (req, res) => {
         if (!conversationCache) conversationList = [];
         logger.info('config', conversationCache ? `conversation · ${conversationCache}` : 'conversation cleared');
       }
-      return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, aspectRatio, conversation: PINNED_CONVERSATION || conversationCache, temporary: conversationIsTemporary });
+      return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, aspectRatio, folder: { name: BRIDGE_FOLDER_NAME, id: bridgeFolderId || null }, conversation: PINNED_CONVERSATION || conversationCache, temporary: conversationIsTemporary });
     }
 
     // Container-management routes. Only the Docker deployment needs these, and
@@ -969,6 +1117,8 @@ const server = http.createServer(async (req, res) => {
         extensions: extClients.size,
         activeJobs: jobs.size,
         defaultModel,
+        perRequestConversations: PER_REQUEST_CONVERSATIONS,
+        folder: { name: BRIDGE_FOLDER_NAME, id: bridgeFolderId || null },
         conversation: PINNED_CONVERSATION || conversationCache,
         temporary: conversationIsTemporary,
         assistant: assistantId || null,
@@ -989,6 +1139,8 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   logger.info('bridge', `listening · http://${HOST}:${PORT}`);
   logger.info('bridge', `default model · ${defaultModel}`);
-  logger.info('bridge', `conversation · ${PINNED_CONVERSATION || 'most recent on the account'}`);
+  logger.info('bridge', PER_REQUEST_CONVERSATIONS
+    ? `conversations · one per API call in folder=${BRIDGE_FOLDER_NAME}`
+    : `conversation · ${PINNED_CONVERSATION || 'most recent on the account'}`);
   logger.info('bridge', 'waiting for the Chrome extension…');
 });

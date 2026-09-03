@@ -12,6 +12,8 @@ const CYCLE_MS = 4 * 60 * 1000; // reconnect before Chrome's long-request ceilin
 let controller = null;
 let connected = false;
 let lastError = '';
+// jobId -> { tabId, transient }. Folder setup uses a short-lived background
+// tab so resolving/creating the folder never navigates the user's active chat.
 const jobTabs = new Map();
 
 // The content script's keepalive port only exists while a de.aipass.net tab is
@@ -84,15 +86,31 @@ async function findChatTab() {
 
 function waitForComplete(tabId, timeoutMs = 15_000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(onUpdated); reject(new Error('tab did not finish loading')); }, timeoutMs);
-    function onUpdated(id, info) {
-      if (id !== tabId || info.status !== 'complete') return;
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(onUpdated);
-      resolve();
+      callback(value);
+    };
+    const timer = setTimeout(() => finish(reject, new Error('tab did not finish loading')), timeoutMs);
+    function onUpdated(id, info) {
+      if (id !== tabId || info.status !== 'complete') return;
+      finish(resolve);
     }
     chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tabId).then((tab) => {
+      if (tab.status === 'complete') finish(resolve);
+    }).catch(() => {});
   });
+}
+
+async function releaseJobTab(jobId) {
+  const record = jobTabs.get(jobId);
+  jobTabs.delete(jobId);
+  if (record?.transient) await chrome.tabs.remove(record.tabId).catch(() => {});
+  return record;
 }
 
 async function ensureContentScript(tab) {
@@ -113,17 +131,21 @@ async function ensureContentScript(tab) {
 }
 
 async function handleJob(job) {
-  const tab = await findChatTab();
+  const transient = job.kind === 'folder';
+  const tab = transient
+    ? await chrome.tabs.create({ url: 'https://de.aipass.net/chat', active: false })
+    : await findChatTab();
   if (!tab) {
     await post('/ext/error', { jobId: job.jobId, message: 'no de.aipass.net tab is open' });
     return;
   }
-  jobTabs.set(job.jobId, tab.id);
+  jobTabs.set(job.jobId, { tabId: tab.id, transient });
   try {
+    if (transient) await waitForComplete(tab.id);
     await ensureContentScript(tab);
     await chrome.tabs.sendMessage(tab.id, { type: 'run', job });
   } catch (err) {
-    jobTabs.delete(job.jobId);
+    await releaseJobTab(job.jobId);
     await post('/ext/error', {
       jobId: job.jobId,
       message: `could not reach the de.aipass.net tab (${tab.url ?? tab.id}): ${err?.message ?? err}`,
@@ -134,9 +156,9 @@ async function handleJob(job) {
 function handleEvent(name, data) {
   if (name === 'job') handleJob(data);
   else if (name === 'abort') {
-    const tabId = jobTabs.get(data.jobId);
-    if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'abort', jobId: data.jobId }).catch(() => {});
-    jobTabs.delete(data.jobId);
+    const record = jobTabs.get(data.jobId);
+    if (record) chrome.tabs.sendMessage(record.tabId, { type: 'abort', jobId: data.jobId }).catch(() => {});
+    releaseJobTab(data.jobId);
   } else if (name === 'reload_extension') {
     try { chrome.runtime.reload(); } catch { /* ignore */ }
   } else if (name === 'reload_tab') {
@@ -216,9 +238,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'from-page') {
     const p = msg.payload;
     if (p.kind === 'chunk') post('/ext/chunk', { jobId: p.jobId, parts: p.parts });
-    else if (p.kind === 'done') { jobTabs.delete(p.jobId); post('/ext/done', { jobId: p.jobId, finishReason: p.finishReason }); }
-    else if (p.kind === 'error') { jobTabs.delete(p.jobId); post('/ext/error', { jobId: p.jobId, message: p.message }); }
-    else if (p.kind === 'loader') { jobTabs.delete(p.jobId); post('/ext/loader', { jobId: p.jobId, raw: p.raw, message: p.message }); }
+    else if (p.kind === 'done') { releaseJobTab(p.jobId); post('/ext/done', { jobId: p.jobId, finishReason: p.finishReason }); }
+    else if (p.kind === 'error') { releaseJobTab(p.jobId); post('/ext/error', { jobId: p.jobId, message: p.message }); }
+    else if (p.kind === 'loader') { releaseJobTab(p.jobId); post('/ext/loader', { jobId: p.jobId, raw: p.raw, message: p.message }); }
     return;
   }
   if (msg?.type === 'status') {

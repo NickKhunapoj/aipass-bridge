@@ -678,6 +678,9 @@ decimals is a pool of 10,000 — the bridge does that division for you.
 | `AIPASS_ASPECT_RATIO` | `1:1` | image models only; the UI offers `1:1`, `3:4`, `4:3` |
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `text` or `off` |
 | `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
+| `AIPASS_PER_REQUEST_CONVERSATIONS` | `1` | `0` restores legacy shared-conversation behavior |
+| `AIPASS_FOLDER_NAME` | `AIPass-Bridge` | folder created/reused for new API conversations |
+| `AIPASS_FOLDER_ID` | *(unset)* | use this existing AiPASS folder id without discovery |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
 | `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin to call the bridge — see below |
 | `AIPASS_ALLOWED_HOSTS` | *(unset)* | extra hostnames accepted in the `Host` header |
@@ -702,7 +705,25 @@ account's credits. So it refuses to be reachable from a web page:
 
 The bridge also serves `POST /v1/chat/completions` and `GET /v1/models`, so any
 OpenAI-compatible client can point at `http://127.0.0.1:8787/v1` for plain
-chat. Only the last user message is forwarded.
+chat. By default each Chat Completions request creates one new AiPASS
+conversation inside the `AIPass-Bridge` folder, then sends only that request's
+latest user message. This keeps API calls isolated, like direct vendor API
+calls, and keeps the AiPASS sidebar tidy. With no `AIPASS_FOLDER_ID` set, the
+extension resolves the folder by its configured name in the visible, signed-in
+AiPASS UI; if it is absent, the UI creates it and returns its account-specific
+id. The id remains in memory only for that bridge process. If folder setup
+fails, the request fails rather than silently creating an unfiled chat.
+
+`AIPASS_FOLDER_ID` and `POST /config` with `folderId` or `folderUrl` are
+optional deployment overrides for a pre-provisioned account. They are never
+needed for the usual per-user setup and should not be put in source control.
+
+AiPASS requests are never sent by the local Node process: the extension injects
+them into the already-open `https://de.aipass.net/chat` page with
+`credentials: 'include'`, so the browser uses its own signed-in session. A
+real `401` or `403` now produces an `AIPASS_AUTH_REQUIRED` error after checking
+that same browser page. Sign in or refresh AiPASS in that tab, then retry; do
+not put an AiPASS cookie or account credential in the bridge configuration.
 
 ## Tests
 

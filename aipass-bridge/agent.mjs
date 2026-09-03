@@ -372,7 +372,7 @@ async function say(text) {
   const res = await fetch(`${BRIDGE}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...(MODEL ? { model: MODEL } : {}), stream: true, messages: [{ role: 'user', content: text }] }),
+    body: JSON.stringify({ ...(MODEL ? { model: MODEL } : {}), aipass_reuse_conversation: true, stream: true, messages: [{ role: 'user', content: text }] }),
   });
   if (!res.ok) throw new Error(`bridge returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
 
@@ -533,6 +533,15 @@ function showDiff() {
     let diff;
     try { diff = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, a, b], { encoding: 'utf8' }); }
     catch (err) { diff = String(err.stdout ?? ''); }
+    // Some Windows environments expose a `diff` command that returns no
+    // unified output. Keep the dry run useful there rather than printing only
+    // the heading and asking the user to trust an invisible change.
+    if (!diff.trim()) {
+      const label = rel.replace(/\\/g, '/');
+      const before = fs.readFileSync(a, 'utf8').split('\n').filter((line, index, lines) => line || index < lines.length - 1);
+      const after = next.split('\n').filter((line, index, lines) => line || index < lines.length - 1);
+      diff = [`--- a/${label}`, `+++ b/${label}`, ...before.map((line) => `-${line}`), ...after.map((line) => `+${line}`)].join('\n');
+    }
     for (const line of diff.split('\n')) {
       if (line.startsWith('+') && !line.startsWith('+++')) console.log(green(line));
       else if (line.startsWith('-') && !line.startsWith('---')) console.log(red(line));
