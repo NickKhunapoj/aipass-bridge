@@ -25,11 +25,20 @@ terminal ──HTTP──▶ bridge (node, no deps)
                       │  chrome.runtime
                       ▼
                    de.aipass.net tab ──▶ /actions/send-message/<id>
+                                     └──▶ /actions/video-generation  (video only)
 ```
 
 **No credential ever leaves the browser.** The real request runs as ordinary
 page JavaScript inside a de.aipass.net tab, so Chrome attaches the session
 cookie itself. The bridge never sees it and nothing is stored on disk.
+
+**Getting started** — [Setup](#setup) · [Use it](#use-it) · [What you get](#what-you-get) · [From code](#from-code)
+
+**The agent** — [Scope, and why](#scope-and-why) · [Set up the coding assistant](#set-up-the-coding-assistant-one-time) · [Local file tools](#local-file-tools) · [Try it](#try-it)
+
+**Reference** — [Conversations](#conversations) · [Models](#models) · [Generating images, video and music](#generating-images-video-and-music) · [Credits](#credits) · [Configuration](#configuration)
+
+**When something is wrong** — [When it is not working](#when-it-is-not-working) · [Tests](#tests) · [Known limits](#known-limits)
 
 ## Setup
 
@@ -45,50 +54,6 @@ tab and leave it open; the popup should read **connected**.
 > [`deploy/`](deploy/README.md) — the same bridge and extension in a container
 > with a noVNC desktop, so it stays up 24/7 without your laptop. The core here
 > is unchanged; that folder only adds container plumbing.
-
-## Set up the coding assistant (one time)
-
-The file-editing agent works best when aipass itself carries the tool protocol,
-rather than the agent resending it every run. Create a custom assistant once at
-[`/ai-assistant/new`](https://de.aipass.net/ai-assistant/new) and fill it in:
-
-| Field | Value |
-|---|---|
-| **ชื่อ AI** (name) | `Local File Coder` |
-| **รูปแบบ** (format) | `สนทนา` (conversational) |
-| **AI โมเดลตั้งต้น** (model) | `Claude Sonnet 5` — best at holding the protocol |
-| **แท็ก** (tags) | `coding`, `local-files` |
-| **รายละเอียด** (description, display only) | `แก้ไขไฟล์ในเครื่องผ่าน bridge ด้วยคำสั่ง NEED / SEARCH / EDIT / CREATE / DONE` |
-| **เพิ่มชุดความรู้** (knowledge files) | leave empty |
-
-Paste this verbatim into **รูปแบบการดำเนินการของ AI** (the behaviour field,
-max 1000 characters — this is 958):
-
-```
-You help the user work on a code project on their computer. You cannot open the files; the user runs each action you write and pastes the result back. Never say you lack tools or ask them to paste files — just write actions.
-
-Write actions on their own lines, exactly like this:
-
-NEED dir .
-NEED file src/app.ts
-SEARCH text to find anywhere in the project
-EDIT src/app.ts
-FIND
-the exact current lines
-NEW
-the replacement
-END
-CREATE notes.md
-file contents
-END
-DONE one sentence summary when finished
-
-Rules. Write prose in the user's language; keep action lines exactly as shown. Every reply needs an action or DONE. Never ask questions — pick a reasonable reading and begin. SEARCH to find where something is instead of reading every file; read a file before you EDIT it. Line numbers on the left are display only — never put them in FIND, copy the code exactly. Keep shortened hostnames like LCLHST as written. Write DONE only at the end, never with a NEED.
-```
-
-Save it, then start one chat with it in the UI and copy the conversation id from
-the URL. Run the agent against that conversation with `--slim` (see below), or
-wire the bridge to create bound conversations automatically — also below.
 
 ## Use it
 
@@ -117,10 +82,10 @@ unusual.
 | `npm run conversations` | list conversations and which is in use |
 | `npm run credits` | how much of the credit pool is left |
 | `npm run doctor` | check every link in the chain and name what is broken |
+| `npm test` | run the test suite |
 
 Every script takes `--help`. Note the `--` separator: `npm run doctor --help`
 prints *npm's* help, `npm run doctor -- --help` prints the script's.
-| `npm test` | run the test suite |
 
 `npm run dev:next` still starts the Next.js app in this repo.
 
@@ -208,12 +173,22 @@ credits.
 
 ### Fields beyond the OpenAI schema
 
-Both are ignored by clients that do not know them:
+All of these are ignored by clients that do not know them, and each is dropped
+rather than forwarded when the chosen model does not accept it:
 
-| field | values | effect |
+| field | applies to | values |
 | --- | --- | --- |
-| `thinking_level` | `low`, `medium`, `high`, and `max` on Claude Opus | how long a reasoning model thinks before answering. The levels are per model — `GET /v1/models` reports each model's `thinking` — and a level the model does not advertise is dropped rather than sent. `npm run chat -- --thinking high`. |
-| `aspect_ratio` | `1:1`, `3:4`, `4:3` | the shape of a generated image (see [Generating an image](#generating-an-image)). |
+| `thinking_level` | reasoning models | `low`, `medium`, `high`, and `max` on Claude Opus. Per model — `GET /v1/models` reports each model's `thinking` |
+| `aspect_ratio` | image and video | images `1:1`, `3:4`, `4:3`; video also `16:9`, `9:16`, and `21:9` on seedance |
+| `resolution` | video | `480p`, `720p` — seedance only; other video models declare none |
+| `duration` | video | seconds |
+| `camera_fixed` | video | boolean |
+| `generate_audio` | video | boolean |
+| `style_preprompt` | video | the style preset's own preprompt text, not its id |
+
+`GET /v1/models` reports the surface per model under `options`, so a client can
+ask rather than guess — see
+[The option surface differs per model](#the-option-surface-differs-per-model).
 
 ## Scope, and why
 
@@ -230,6 +205,50 @@ rather than any single rule.
 So this does the one thing that works reliably: send a message, stream the
 answer. Multi-turn works because the server remembers the conversation, the
 same way the web UI does.
+
+## Set up the coding assistant (one time)
+
+The file-editing agent works best when aipass itself carries the tool protocol,
+rather than the agent resending it every run. Create a custom assistant once at
+[`/ai-assistant/new`](https://de.aipass.net/ai-assistant/new) and fill it in:
+
+| Field | Value |
+|---|---|
+| **ชื่อ AI** (name) | `Local File Coder` |
+| **รูปแบบ** (format) | `สนทนา` (conversational) |
+| **AI โมเดลตั้งต้น** (model) | `Claude Sonnet 5` — best at holding the protocol |
+| **แท็ก** (tags) | `coding`, `local-files` |
+| **รายละเอียด** (description, display only) | `แก้ไขไฟล์ในเครื่องผ่าน bridge ด้วยคำสั่ง NEED / SEARCH / EDIT / CREATE / DONE` |
+| **เพิ่มชุดความรู้** (knowledge files) | leave empty |
+
+Paste this verbatim into **รูปแบบการดำเนินการของ AI** (the behaviour field,
+max 1000 characters — this is 958):
+
+```
+You help the user work on a code project on their computer. You cannot open the files; the user runs each action you write and pastes the result back. Never say you lack tools or ask them to paste files — just write actions.
+
+Write actions on their own lines, exactly like this:
+
+NEED dir .
+NEED file src/app.ts
+SEARCH text to find anywhere in the project
+EDIT src/app.ts
+FIND
+the exact current lines
+NEW
+the replacement
+END
+CREATE notes.md
+file contents
+END
+DONE one sentence summary when finished
+
+Rules. Write prose in the user's language; keep action lines exactly as shown. Every reply needs an action or DONE. Never ask questions — pick a reasonable reading and begin. SEARCH to find where something is instead of reading every file; read a file before you EDIT it. Line numbers on the left are display only — never put them in FIND, copy the code exactly. Keep shortened hostnames like LCLHST as written. Write DONE only at the end, never with a NEED.
+```
+
+Save it, then start one chat with it in the UI and copy the conversation id from
+the URL. Run the agent against that conversation with `--slim` (see below), or
+wire the bridge to create bound conversations automatically — also below.
 
 ## Local file tools
 
@@ -451,9 +470,10 @@ most recent.
 
 ## Models
 
-The account carries far more than chat models — the live list is 34, of which 11
-generate images, video or music. The bridge used to hide those, so a third of
-what the account can do was invisible from here.
+The account carries far more than chat models. The live list is 34, of which 33
+are selectable: 20 chat, 5 image, 4 video, 2 music and 2 deep research. The
+bridge used to hide the 11 generators, so a third of what the account can do was
+invisible from here.
 
 ```bash
 npm run models              # everything, grouped
@@ -461,7 +481,7 @@ npm run models -- image     # one category
 ```
 
 ```
-สนทนา · chat  (22)
+สนทนา · chat  (20)
   gemini-3.1-flash-lite                      Gemini 3.1 Flash Lite  [free]
   claude-opus-5@azure                        Claude Opus 5
   ...
@@ -478,20 +498,22 @@ The popup groups its dropdown the same way, and `/v1/models` takes
 **The category is derived here, not sent.** `list-models` carries `id`,
 `displayName`, `provider`, `description`, icons, `ready`, `selectable`,
 `isFreeCredit` and `thinkingConfig` — and no category at all, so the tabs in the
-web UI are built client-side. The rules that reproduce them live at the top of
-`bridge/server.mjs`, each annotated with the models it actually catches, so they
-can be re-checked against a fresh capture rather than trusted.
+web UI are built client-side. The lists that reproduce them are at the top of
+`bridge/server.mjs`, lifted from the app's own bundle rather than guessed, and
+include ids this account cannot yet see (`sora-2`, `wan2.2@jts`, `FLUX.2-pro`,
+the `gemini-3.1-*-image` family) so a model that appears later is already
+classified. A name-shaped fallback catches anything genuinely new.
 
 Two other fields now matter: a model that is `ready` but `selectable: false`
 (`openthai2.0-legal@jts` is the live example) is not offered, because the web UI
 does not offer it either.
 
-> **Listing them is not yet driving them.** A chat request to an image model
-> goes upstream, but the reply comes back as frames this bridge does not decode
-> yet, so you get an empty answer rather than a picture. `AIPASS_MODEL_FILTER=chat`
-> restores the old text-only list if that bothers a client.
+All of them are drivable now, not just listable — see
+[Generating images, video and music](#generating-images-video-and-music).
+`AIPASS_MODEL_FILTER=chat` restores the old text-only list if a client would
+rather not see the generators at all.
 
-## Generating an image
+## Generating images, video and music
 
 Pick an image model and ask for a picture. The reply comes back as a markdown
 image, because chat completions have no field for one and every client already
@@ -513,7 +535,41 @@ The aspect ratio rides on the same `imageAspectRatio` field the web UI sends.
 A request can set `aspect_ratio`, `POST /config {"aspectRatio":"4:3"}` sets the
 default, and `AIPASS_ASPECT_RATIO` sets it at startup.
 
-### Video and music
+### A worked example
+
+This came out of one command. The prompt is a heading and a ten-row CSV of a
+northern Thai menu, pasted straight into the REPL:
+
+```bash
+npm run chat -- --new --model gpt-image-2 --ratio 3:4
+```
+
+```
+> สร้างใบเมนูอาหารธีมล้านนา เอิร์ทโทน มีความภาคเหนือ โดยอิงรายละเอียดตามนี้ทั้งหมด
+"ร้านมาเหนือ
+ลำดับ,รายการเมนู,ราคา (บาท)
+1,ข้าวซอยไก่ ,65
+2,ข้าวซอยเนื้อโคขุน,85
+3,ขนมจีนน้ำเงี้ยวเชียงราย,55
+4,แกงฮังเลหมูนุ่ม,95
+5,ลาบหมูคั่วเครื่องเทศ,80
+6,น้ำพริกหนุ่ม + ผักลวก,60
+7,น้ำพริกอ่อง + ผักสด,60
+8,ไส้อั่วสมุนไพร (จานเล็ก),75
+9,จิ๊นนึ่งน้ำพริกข่า,120
+10,แกงโฮะวุ้นเส้น,70
+  (13 lines · sent as one message)
+[image saved to /Users/you/aipass-1788367390207-2.png]
+```
+
+<img src="docs/lanna-menu.png" alt="A Lanna-themed restaurant menu with ten Thai dishes and prices" width="420">
+
+768 × 1024 — the `3:4` reached the model — with all ten rows, names and prices
+intact. Both halves of that matter: `(13 lines · sent as one message)` is the
+paste arriving whole rather than as thirteen separate requests, and the saved
+file is the `file` frame decoding correctly.
+
+### What is different about video and music
 
 The same command, with a video or music model:
 
@@ -558,40 +614,6 @@ a generation:
 The inline caps (50 MB video, 25 MB audio, 5 MB image) apply only to
 same-origin media that needs the session cookie — an uploaded file served back,
 not a generated one. Generated media is passed through as its signed link.
-
-### A worked example
-
-This came out of one command. The prompt is a heading and a ten-row CSV of a
-northern Thai menu, pasted straight into the REPL:
-
-```bash
-npm run chat -- --new --model gpt-image-2 --ratio 3:4
-```
-
-```
-> สร้างใบเมนูอาหารธีมล้านนา เอิร์ทโทน มีความภาคเหนือ โดยอิงรายละเอียดตามนี้ทั้งหมด
-"ร้านมาเหนือ
-ลำดับ,รายการเมนู,ราคา (บาท)
-1,ข้าวซอยไก่ ,65
-2,ข้าวซอยเนื้อโคขุน,85
-3,ขนมจีนน้ำเงี้ยวเชียงราย,55
-4,แกงฮังเลหมูนุ่ม,95
-5,ลาบหมูคั่วเครื่องเทศ,80
-6,น้ำพริกหนุ่ม + ผักลวก,60
-7,น้ำพริกอ่อง + ผักสด,60
-8,ไส้อั่วสมุนไพร (จานเล็ก),75
-9,จิ๊นนึ่งน้ำพริกข่า,120
-10,แกงโฮะวุ้นเส้น,70
-  (13 lines · sent as one message)
-[image saved to /Users/you/aipass-1788367390207-2.png]
-```
-
-<img src="docs/lanna-menu.png" alt="A Lanna-themed restaurant menu with ten Thai dishes and prices" width="420">
-
-768 × 1024 — the `3:4` reached the model — with all ten rows, names and prices
-intact. Both halves of that matter: `(13 lines · sent as one message)` is the
-paste arriving whole rather than as thirteen separate requests, and the saved
-file is the `file` frame decoding correctly.
 
 ### Music, from a real run
 
@@ -709,12 +731,6 @@ The **style** presets live in `/loaders/list-video-styles` as records of
 Documentary, AI / Cyber, Minimal, Realistic and the rest. The app does not send
 the id; it sends that record's `preprompt` string, so `--style` takes the text.
 
-The model categories (`kind`) are the app's own lists, lifted from its bundle
-rather than guessed from name shapes, and cover ids this account cannot yet see
-— `sora-2`, `wan2.2@jts`, `FLUX.2-pro`, the `gemini-3.1-*-image` family — so a
-model that appears later is already classified. A name-shaped fallback still
-catches anything genuinely new.
-
 ## When it is not working
 
 Every failure in this chain looks the same from a client — the request just does
@@ -727,7 +743,7 @@ npm run doctor
 ```
 ✓ bridge         responding
 ✓ extension      1 attached
-✓ login          signed in — 23 models
+✓ login          signed in — 33 models
 ✓ credits        9,833 of 10,000 left (98%)
 ✓ conversation   1137342f9c0a4e21
 ✓ round trip     gemini-3.1-flash-lite replied in 1.2s
@@ -789,10 +805,15 @@ decimals is a pool of 10,000 — the bridge does that division for you.
 | `AIPASS_MODEL` | `gemini-3.1-flash-lite` | used when no model is given |
 | `AIPASS_MODELS` | two known ids | fallback list when no extension is attached |
 | `AIPASS_MODEL_FILTER` | `all` | `chat` drops the image/video/music generators |
-| `AIPASS_ASPECT_RATIO` | `1:1` | image models only; the UI offers `1:1`, `3:4`, `4:3` |
+| `AIPASS_ASPECT_RATIO` | `1:1` | images: `1:1`, `3:4`, `4:3`. Video also takes `16:9`, `9:16`, and `21:9` on seedance |
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `text` or `off` |
 | `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
+| `AIPASS_MEDIA_TIMEOUT_MS` | `900000` | the same, for video and music models, which go quiet for minutes |
+| `AIPASS_HOST` | `127.0.0.1` | interface to bind; leaving it on loopback is the point |
+| `AIPASS_BRIDGE` | `http://127.0.0.1:8787` | read by the CLIs, not the server — same as `--bridge` |
+| `AIPASS_ASSISTANT_ID` | *(unset)* | bind new conversations to a custom aipass assistant |
+| `AIPASS_ASSISTANT_FIELD` | `aiAssistantId` | the field name that carries it; confirmed live, override only if it changes |
 | `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin to call the bridge — see below |
 | `AIPASS_ALLOWED_HOSTS` | *(unset)* | extra hostnames accepted in the `Host` header |
 | `AIPASS_ADMIN` | *(unset)* | `1` enables the container-management routes |
@@ -824,7 +845,7 @@ chat. Only the last user message is forwarded.
 npm test
 ```
 
-53 tests, no dependencies, a few seconds. `test/harness.mjs` runs the real
+93 tests, no dependencies, a few seconds. `test/harness.mjs` runs the real
 bridge as a subprocess and a scriptable stand-in for the extension, so tests
 drive the actual HTTP surface and the real CLIs rather than mocks of them.
 
@@ -836,6 +857,12 @@ bytes on disk are unchanged; splitting a rejected turn; dropping a line that
 cannot be sent at any size; a premature `DONE` being ignored; recovery when the
 model drifts into prose; refusing paths outside the project root; and dry run
 leaving the disk untouched.
+
+The media cases are built from shapes captured off the live service rather than
+invented: a video part that carries `snapshotUrl` and no `url`, a signed storage
+link whose `X-Goog-Signature` has to survive intact, a video model becoming a
+job while a chat model still streams, and a resolution being dropped for a model
+that declares none.
 
 To add a case, script the model's replies with `scripted([...])` and, where a
 filter is being modelled, pass `reject` to refuse payloads matching a pattern.
