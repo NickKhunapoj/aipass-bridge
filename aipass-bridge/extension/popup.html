@@ -21,8 +21,11 @@
 <div class="row"><span class="k">chat tab</span><span class="v" id="tab"></span></div>
 <div class="row"><span class="k">active jobs</span><span class="v" id="jobs"></span></div>
 
-<label for="model">Default model <span id="count"></span></label>
+<label for="model">Standalone API default <span id="count"></span></label>
 <select id="model"></select>
+
+<label for="cline-model">Cline fallback model</label>
+<select id="cline-model"></select>
 
 <label for="url">Bridge URL</label>
 <input id="url" spellcheck="false" placeholder="http://127.0.0.1:8787">
@@ -31,6 +34,6 @@
   <button id="save">Save &amp; reconnect</button>
   <button id="refresh">Refresh models</button>
 </div>
-<div class="hint">Used only when a client sends no model of its own.</div>
+<div class="hint">Standalone applies when an API request has no model. Cline uses its own Model ID first, then its separate fallback.</div>
 <div class="err" id="err"></div>
 <script src="popup.js"></script>

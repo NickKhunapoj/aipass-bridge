@@ -175,18 +175,20 @@ test('surfaces an upstream error inside the stream', async () => {
   await ext.disconnect();
 });
 
-test('passes an assistant id and field through to the create call', async (t) => {
-  const ext = await new FakeExtension(bridge.base).connect();
+test('passes an assistant id through only with an explicitly configured field', async (t) => {
+  const configured = await startBridge({ AIPASS_ASSISTANT_FIELD: 'verifiedAssistantField' });
+  t.after(() => configured.stop());
+  const ext = await new FakeExtension(configured.base).connect();
   t.after(() => ext.disconnect());
 
-  const made = await (await fetch(`${bridge.base}/conversations/new`, {
+  const made = await (await fetch(`${configured.base}/conversations/new`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ message: 'hi', assistant: 'asst_xyz' }),
   })).json();
 
   assert.match(made.id, /^[0-9a-f]{16}$/);
   assert.equal(ext.created.at(-1).assistant, 'asst_xyz');
-  assert.equal(ext.created.at(-1).assistantField, 'aiAssistantId', 'default field name until a capture confirms it');
+  assert.equal(ext.created.at(-1).assistantField, 'verifiedAssistantField');
 });
 
 test('creates a conversation and adopts it', async (t) => {

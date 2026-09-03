@@ -1,389 +1,185 @@
-# aipass bridge
+# AiPASS bridge
 
-Use [de.aipass.net](https://de.aipass.net/chat) from your terminal, with
-streaming.
+`aipass-bridge` is an unofficial, local protocol adapter that lets an
+OpenAI-compatible coding client such as Cline use the logged-in
+[AiPASS Web Chat](https://de.aipass.net/chat) as its model backend.
 
-<img width="2048" height="1055" alt="image" src="https://github.com/user-attachments/assets/fa865ce3-7cf1-41f9-b98e-1f5a489a7619" />
-
-<img width="2048" height="1332" alt="image" src="https://github.com/user-attachments/assets/101dcb7c-8e20-47f1-8858-de43aa06bc8f" />
-
-<img width="2048" height="1332" alt="image" src="https://github.com/user-attachments/assets/d9115273-2585-4eeb-808e-3c6368b985a7" />
-
-<img width="2904" height="1444" alt="image" src="https://github.com/user-attachments/assets/0715f177-0ac0-476a-a175-46661e99cf89" />
-
-<img width="2048" height="1067" alt="image" src="https://github.com/user-attachments/assets/1a288db9-bd0a-42cc-9651-bc66958d5fc9" />
-
-
-https://github.com/user-attachments/assets/56975f8d-a9ad-4562-9e00-422078cc66a2
-
-https://github.com/user-attachments/assets/aa8ee7aa-ba2a-4f7c-ab9c-4f401cffd3b2
-
-
-```
-terminal ──HTTP──▶ bridge (node, no deps)
-                      │  SSE: jobs out, POST: deltas back
-                      ▼
-                   extension service worker
-                      │  chrome.runtime
-                      ▼
-                   de.aipass.net tab ──▶ /actions/send-message/<id>
+```text
+Cline / VS Code ── OpenAI Chat Completions ──> aipass-bridge
+                                                   │
+                                             browser extension
+                                                   │
+                                           authenticated AiPASS Web Chat
 ```
 
-**No credential ever leaves the browser.** The real request runs as ordinary
-page JavaScript inside a de.aipass.net tab, so Chrome attaches the session
-cookie itself. The bridge never sees it and nothing is stored on disk.
+The division of responsibility is deliberate:
 
-## Setup
+- **AiPASS Web** is the remote model provider and retains its own system prompt.
+- **aipass-bridge** adapts messages, sessions, a textual tool protocol, schema
+  validation, and OpenAI-style SSE responses.
+- **Cline** is the coding agent: it owns the transcript, filesystem, terminal,
+  MCP, approvals, patches, and agent lifecycle. The bridge never runs tools.
 
-```bash
-npm run dev
+## Important limitations
+
+This is not an AiPASS API client. An authenticated `de.aipass.net` page sends
+the actual request; its cookies stay in that browser page and are never read,
+exported, stored, or proxied by Node.
+
+AiPASS's native system instructions cannot be replaced. Cline `system` and
+`developer` messages are compacted into the first **ordinary user-visible task
+message** and are explicitly labelled as non-privileged context. Model behavior
+can therefore differ from a normal OpenAI provider, and can differ between
+AiPASS model families.
+
+The web UI is unofficial integration surface. UI or request changes can break
+the extension; AiPASS can reject content; all task context and tool results
+sent through the bridge are processed remotely. There is no guarantee of
+API-equivalent function-calling behavior.
+
+Attachment uploads are intentionally **not enabled yet**. The bridge recognizes
+explicit image data URLs so it can report a precise error, but it does not
+silently drop them, base64-inline them into text, fetch remote URLs, read local
+file paths, or invent an AiPASS upload endpoint. Implementing uploads requires
+observing the logged-in AiPASS UI's real attach-and-send flow first.
+
+Custom AiPASS-assistant binding is also optional and disabled by default. Set
+`AIPASS_ASSISTANT_FIELD` only after capturing and verifying the actual
+first-party new-chat form field; the bridge refuses a requested binding when it
+has not been configured instead of guessing.
+
+## Cline setup
+
+1. Start the bridge from the repository root:
+
+   ```powershell
+   node aipass-bridge/bridge/server.mjs
+   ```
+
+   `npm run dev` is equivalent when npm is functioning on the host. Set
+   `AIPASS_BRIDGE_API_KEY` first if you want the local endpoint to require a
+   bearer token.
+
+2. In Chrome, open `chrome://extensions`, enable **Developer mode**, choose
+   **Load unpacked**, and select `aipass-bridge/extension`. Sign into AiPASS,
+   open `https://de.aipass.net/chat`, and keep the tab open.
+
+3. Confirm `http://127.0.0.1:8787/status` reports an extension connection.
+
+4. In VS Code Cline choose **OpenAI Compatible** and set:
+
+   ```text
+   Base URL: http://127.0.0.1:8787/v1
+   API Key: AIPASS_BRIDGE_API_KEY (or any non-empty value if unset)
+   Model ID: one returned by http://127.0.0.1:8787/v1/models
+   ```
+
+The bridge binds to `127.0.0.1` by default. Do not expose it publicly.
+
+## Cline request model
+
+One Cline task maps to one freshly created AiPASS conversation. The bridge does
+not select or reuse the account's latest normal chat. A client task/session id
+header is used when available; otherwise the stable early task context is
+fingerprinted. Sessions expire after one hour by default
+(`AIPASS_CLINE_SESSION_TTL_MS`). They are in-memory only; a bridge restart
+creates a fresh execution-context cache from Cline's canonical transcript.
+
+The bridge keeps delivery metadata only: task-to-conversation mapping, selected
+model, tool-set hash, message delivery hashes, pending call ids, delivered tool
+result ids, attachment metadata, and a compact semantic checkpoint. It does not
+persist prompts, source files, tool results, or AiPASS credentials by default.
+
+On the first turn it sends a cooperative task contract, compact tool summaries,
+the non-privileged client instructions, and the current user task. Later Cline
+requests often resend their full transcript; only new user information and
+`role: tool` results are sent upstream. A tool result is represented as:
+
+```text
+CLINE TOOL RESULT
+call: call_123
+tool: read_file
+<result>
+...
+</result>
 ```
 
-Load the extension: `chrome://extensions` → Developer mode → **Load unpacked**
-→ select `aipass-bridge/extension`. Then open a `https://de.aipass.net/chat`
-tab and leave it open; the popup should read **connected**.
+Long sessions use Cline as the source of truth. Once the approximate delivered
+context exceeds `AIPASS_CLINE_CONTEXT_BYTES` (default `180000`), the bridge
+creates a fresh AiPASS conversation with a compact checkpoint of the task goal,
+latest decision, recent result summaries, tool contract, and pending work.
 
-## Set up the coding assistant (one time)
+## Tool protocol
 
-The file-editing agent works best when aipass itself carries the tool protocol,
-rather than the agent resending it every run. Create a custom assistant once at
-[`/ai-assistant/new`](https://de.aipass.net/ai-assistant/new) and fill it in:
+AiPASS Web does not expose Cline's OpenAI function-call interface directly, so
+the model receives a compact textual protocol. The client-provided OpenAI tool
+schemas stay local and authoritative. The model may request tools using only:
 
-| Field | Value |
-|---|---|
-| **ชื่อ AI** (name) | `Local File Coder` |
-| **รูปแบบ** (format) | `สนทนา` (conversational) |
-| **AI โมเดลตั้งต้น** (model) | `Claude Sonnet 5` — best at holding the protocol |
-| **แท็ก** (tags) | `coding`, `local-files` |
-| **รายละเอียด** (description, display only) | `แก้ไขไฟล์ในเครื่องผ่าน bridge ด้วยคำสั่ง NEED / SEARCH / EDIT / CREATE / DONE` |
-| **เพิ่มชุดความรู้** (knowledge files) | leave empty |
-
-Paste this verbatim into **รูปแบบการดำเนินการของ AI** (the behaviour field,
-max 1000 characters — this is 958):
-
-```
-You help the user work on a code project on their computer. You cannot open the files; the user runs each action you write and pastes the result back. Never say you lack tools or ask them to paste files — just write actions.
-
-Write actions on their own lines, exactly like this:
-
-NEED dir .
-NEED file src/app.ts
-SEARCH text to find anywhere in the project
-EDIT src/app.ts
-FIND
-the exact current lines
-NEW
-the replacement
+```text
+ACTION read_file
+INPUT
+{"path":"src/server.mjs"}
 END
-CREATE notes.md
-file contents
-END
-DONE one sentence summary when finished
-
-Rules. Write prose in the user's language; keep action lines exactly as shown. Every reply needs an action or DONE. Never ask questions — pick a reasonable reading and begin. SEARCH to find where something is instead of reading every file; read a file before you EDIT it. Line numbers on the left are display only — never put them in FIND, copy the code exactly. Keep shortened hostnames like LCLHST as written. Write DONE only at the end, never with a NEED.
 ```
 
-Save it, then start one chat with it in the UI and copy the conversation id from
-the URL. Run the agent against that conversation with `--slim` (see below), or
-wire the bridge to create bound conversations automatically — also below.
+Multiple blocks are allowed. Before emitting OpenAI `tool_calls`, the bridge
+checks that every requested tool exists in the current Cline request, parses its
+JSON, and validates it against the original schema. Unknown, malformed, or
+schema-invalid calls fail closed; no tool is executed by the bridge. Valid calls
+become normal OpenAI `assistant.tool_calls` responses with stable `call_…` ids,
+including streamed `delta.tool_calls` chunks when `stream: true`.
 
-## Use it
+## Failures and diagnostics
 
-```bash
-npm run chat                          # interactive
-npm run chat -- "ช่วยสรุปข่าว AI วันนี้"   # one-shot
+The extension reports only safe upstream diagnostics: bridge session id,
+conversation id, semantic category, byte length, attachment count, model, and
+HTTP status. It does not log message bodies, source, command output, schemas,
+cookies, authorization headers, or credentials. A 403 does not mark the Cline
+message or tool result as delivered. A missing/busy conversation, disconnected
+extension/tab, interrupted stream, malformed tool request, or unverified
+attachment upload returns a provider error to Cline instead of switching to an
+unrelated chat or model.
+
+No request rewriting, token substitution, content splitting, or source-line
+omission is used to work around AiPASS access controls or filtering. If AiPASS
+rejects a legitimate turn, reduce context through normal task compaction or
+report the failure.
+
+Set `AIPASS_DEBUG=1` (or `AIPASS_LOG_LEVEL=DEBUG`) for the safe metadata above.
+
+## Existing terminal tools
+
+```powershell
+node aipass-bridge/chat.mjs
+node aipass-bridge/agent.mjs "Explain this project" --root .
 ```
 
-In interactive mode: `/models` lists what's available, `/model <id>` switches,
-Ctrl+C quits.
+`agent.mjs` remains a separate local CLI with its own explicit file-action
+format. It is dry-run by default; use `--apply` to write and `--allow-run` to
+allow its shell action. It is not part of Cline's tool execution path.
 
-| script | |
-|---|---|
-| `npm run dev` | start the bridge on :8787 |
-| `npm run chat` | terminal client |
-| `npm run agent -- "task" --root .` | local file tools, in a fresh conversation |
-| `npm run agent -- "task" --root . --watch` | stay open for follow-up tasks on the same conversation |
-| `npm run models` | list models, marking free-credit ones |
-| `npm run conversations` | list conversations and which is in use |
-| `npm test` | run the test suite |
+## Tests and live validation
 
-`npm run dev:next` still starts the Next.js app in this repo.
+Run the suite with:
 
-## What you get
-
-Whatever the web UI gives you for the same message — including its server-side
-tools. A `web_search` shows up live and its sources are listed at the end:
-
-```
-[web_search] {"query":"aipass.go.th"}
-[web_search] returned 4821 chars
-AiPASS เป็นแพลตฟอร์มภายใต้โครงการ TH-AI Passport …
-sources:
-  - Aipass https://aipass.go.th/
+```powershell
+node --test aipass-bridge/test/*.test.mjs
 ```
 
-Tool activity is sent as `reasoning_content`, so an OpenAI client that only
-reads `content` sees a clean answer. `AIPASS_TOOL_VISIBILITY=text` inlines it,
-`off` drops it.
+The tests use a scriptable extension stand-in, so they validate the HTTP and
+browser-job protocol but **do not prove a live AiPASS account**. They cover
+plain chat, initialization, system/developer normalization, arbitrary tools,
+tool-call validation, multiple sessions, streaming calls, tool-result
+continuation, idempotent transcripts, upstream rejection state, restart,
+checkpointing, Cline model selection, and attachment failure behavior.
 
-## Scope, and why
+Live validation still required after signing in:
 
-Only the user's message is sent. Not a system prompt, not a transcript.
-
-That is not a limitation of the bridge, it is what the endpoint accepts. A
-`messages` array containing an **assistant** turn is rejected upstream with a
-bare `403` from Google Frontend, before the model sees it — the web UI never
-sends one, because the server owns the conversation and its history. Attempts
-to supply an agent-style system prompt were also rejected, at sizes and shapes
-that plain text of the same size passed, which points at request scoring
-rather than any single rule.
-
-So this does the one thing that works reliably: send a message, stream the
-answer. Multi-turn works because the server remembers the conversation, the
-same way the web UI does.
-
-## Local file tools
-
-```bash
-npm run agent -- "add a health route that returns ok" --root .
-```
-
-Dry run by default: edits go to an in-memory overlay so the model can read back
-its own pending work, you get a unified diff at the end, and nothing touches
-disk until `--apply`. Paths are confined to `--root`; shell access needs
-`--allow-run`.
-
-### Actions the agent understands
-
-The model replies with these on their own lines; the agent runs each one locally
-and pastes the result back. This is the whole tool set:
-
-| Action | What it does |
-|---|---|
-| `NEED dir <path>` | list a directory (`.` for the project root) |
-| `NEED file <path>` | read a file, with line numbers; add a range like `NEED file src/app.ts 200-320` for a slice of a long one |
-| `SEARCH <text>` | grep the whole project, returning `file:line: excerpt` matches — find a symbol without reading every file |
-| `EDIT <path>` → `FIND` … `NEW` … `END` | replace an exact snippet; the `FIND` text must match **one** place or the edit is refused |
-| `CREATE <path>` … `END` | create a new file or overwrite an existing one |
-| `RUN` … `END` | run a shell command — **off unless you pass `--allow-run`** |
-| `DONE <summary>` | finish, with a one-line summary |
-
-A few guarantees worth knowing: reads carry a line-number gutter but the model
-never has to keep those (they are stripped from `FIND` automatically); an `EDIT`
-whose `FIND` text is not unique is refused rather than applied to the wrong
-occurrence; and long files page a screen at a time with a hint for the next
-range.
-
-**Watch mode** (`--watch`) keeps the agent open and takes follow-up tasks on the
-same conversation, so the model keeps everything it has already read in context
-— and because the server holds that history, each new task is still just one
-small message. Run it in your editor's integrated terminal for a live edit loop.
-
-**Binding to the custom assistant** (created above). Either point at a
-conversation started under it — `--conversation <id> --slim` — or let the bridge
-create bound conversations with `--assistant <id>` (which implies `--slim`). The
-form field that carries the assistant id is set by `AIPASS_ASSISTANT_FIELD` on
-the bridge (default `aiAssistantId`); confirm it once from a capture of the UI's
-"new chat" request and every run binds automatically.
-
-This works within the constraints above rather than against them:
-
-- **Instructions are sent once**, as the first message of the conversation. The
-  server remembers them, so later turns carry only the tool results — typically
-  a couple of hundred bytes instead of resending a prompt every step.
-- **No system prompt.** The preamble is just the first user message, which is
-  the only channel this endpoint has.
-- **The format is prose-shaped**: `NEED file some_file.ts`, no angle brackets, no
-  `key=value` pairs, no absolute paths, no banner rules. Every one of those drew
-  a 403 in earlier attempts, and none of them was load-bearing.
-- **It never claims the model has tools.** The model's own system prompt says
-  its tool is `web_search`, so a preamble written like a tool protocol makes it
-  search for the syntax and then refuse, correctly, on the grounds that it has
-  no file access. The preamble instead states the division of labour plainly:
-  you have the files, the model writes lines, you run them and paste results
-  back. It also says outright not to explain a lack of file access, which is the
-  failure mode this replaces.
-- **The first message includes the top-level listing**, so the model is grounded
-  in the real directory instead of guessing a first path.
-
-- **A rejected turn is split and resent.** File contents are arbitrary: a
-  README carries shell commands, URLs and code fences, and any of those can push
-  a request past an upstream filter. On a 403 the agent halves the message and
-  sends the halves in sequence, recursively, down to ~300 bytes. The server
-  remembers each part, so the model still sees the whole thing. If a fragment is
-  rejected even on its own, the agent prints it rather than failing silently.
-
-- **A custom aipass assistant carries the protocol.** The sanctioned way to
-  give the model the tool convention is aipass's own Create AI Assistant
-  (`/ai-assistant/new`) — paste the NEED/EDIT/CREATE/DONE instructions into its
-  behaviour field. Then run against a conversation bound to that assistant with
-  `--conversation <id>` (or `--reuse`) plus `--slim`, which drops the built-in
-  preamble the assistant already provides.
-- **Trigger-shaped tokens are encoded, symmetrically.** Everything sent upstream
-  is encoded and everything read back is decoded — so the task text and preamble
-  are covered, not just file contents. Three families, all confirmed against the
-  live edge: `localhost` / `127.0.0.1` / `0.0.0.0` / `169.254.169.254` /
-  `file://` (SSRF); any tag-opening `<` — `<html`, `<div`, a JSX component,
-  `<script`, `<!--`, `<!doctype` — while leaving `a < b` and `=>` alone (XSS);
-  and `.env` / `process.env` (the classic secrets-probe pattern). They go out as `LCLHST`, `CMT-OPEN`, `DOT-ENV` and so
-  on, and are restored before anything is written — the bytes on disk are exactly
-  what the file had. A file whose *name* is encoded (a real `.env` shown as
-  `DOT-ENV`) still opens, because the decode runs on the model's actions too.
-
-- **Lines that cannot be sent at all are dropped.** Real source contains
-  code-execution shapes — `node -e`, `curl`, `rm -rf`, `/bin/sh`, `../../` —
-  that no amount of splitting gets past. When a fragment is rejected even on its
-  own, those lines are replaced with a note and the rest goes through, so one
-  bad line costs a line rather than the whole run.
-
-Tool results are capped at 3000 bytes (`--max-result`) for the same reason.
-
-The npm scripts in this repo avoid `node -e "…"` one-liners for exactly this
-reason — the agent reads `package.json` early in almost any task, and a script
-field shaped like code execution got the whole read rejected.
-
-## Try it
-
-Run these top to bottom — the early ones are zero-risk (read-only, or a dry run
-that writes nothing), and each proves a bit more. Use a scratch folder for the
-builds so your own repo stays clean:
-
-```bash
-mkdir -p ~/Desktop/agent-test
-```
-
-**1. Read-only — proves the whole chain, writes nothing.**
-
-```bash
-npm run agent -- "What does this project do and what's the tech stack?" --root .
-```
-
-It reads the README and `package.json`, then answers. If this works, the
-extension, bridge, and conversation flow are all healthy.
-
-**2. One self-contained file — the classic first build (dry run).**
-
-```bash
-npm run agent -- "Create index.html: a self-contained todo app with inline CSS and JS. Add, complete, delete todos, persist to localStorage. Clean, modern look." --root ~/Desktop/agent-test
-```
-
-You see the whole file as a `+` diff; nothing is written. Add `--apply` to write
-it, then `open ~/Desktop/agent-test/index.html`.
-
-**3. Edit an existing file — exercises `EDIT` / `FIND` / `NEW`.**
-
-```bash
-npm run agent -- "In index.html, add a button that clears all completed todos at once." --root ~/Desktop/agent-test --apply
-```
-
-It reads the file first, then makes a surgical edit — a real before/after diff,
-not a rewrite.
-
-**4. A small multi-file project.**
-
-```bash
-npm run agent -- "Create a tiny expense tracker: index.html, style.css, and app.js as separate files. Add expenses with amount and category, show a running total." --root ~/Desktop/agent-test --apply
-```
-
-**5. Watch mode — iterate live, the real workflow.**
-
-```bash
-npm run agent -- "Create a Pomodoro timer as a single index.html: 25-minute countdown, start/pause/reset." --root ~/Desktop/agent-test --apply --watch
-```
-
-Then keep typing follow-ups at the `task>` prompt — each builds on what it
-already wrote, in the same conversation:
-
-```
-task> add a short-break mode of 5 minutes
-task> play a sound when the timer hits zero
-task> make it dark by default
-```
-
-**6. Search a real codebase — run this against the repo itself.** A task that
-has to *find* something first is where `SEARCH` earns its place:
-
-```bash
-npm run agent -- "Find everywhere the bridge reads a process.env variable and list each one with what it configures." --root .
-```
-
-Watch it `SEARCH process.env`, get back `file:line` hits across the tree, read
-only the files that matter, and answer — instead of reading everything. A rename
-task (*"find every call to `outbound(` and …"*) exercises search-then-edit the
-same way.
-
-Start with **#1**: if it answers cleanly, everything after it is just the agent
-doing more. If a step returns a `403`, it hit an upstream filter shape not yet
-substituted — the failing fragment prints, and it is usually a one-line fix.
-
-## Conversations
-
-The bridge can create them, the way the chat page does — a form post to
-`/chat.data` with `intent=create-conversation`. The server derives the id from
-the first sixteen hex characters of the `clientCreateRequestId` it is given,
-which is why ids look the way they do.
-
-```bash
-curl -s localhost:8787/conversations/new -H 'content-type: application/json' -d '{"message":"hello"}'
-npm run conversations     # list them, marking the one in use
-```
-
-**`npm run agent` starts a fresh conversation for every run.** A conversation
-carries its own history, so reusing one drags in whatever was said before —
-including a refusal, which the model then sees itself having made and repeats.
-`--reuse` continues the most recent instead, `--conversation ID` continues a
-specific one. `npm run chat` continues the most recent by default, since that is
-what makes a chat a chat; `--new` starts a clean one.
-
-Posting to an invented id returns `404 Conversation not found`, and a
-conversation that stops accepting messages (`404` when deleted, `409` when the
-server still believes a generation is running) makes the bridge move to the next
-most recent.
-
-## Configuration
-
-| env | default | |
-|---|---|---|
-| `AIPASS_PORT` | `8787` | |
-| `AIPASS_MODEL` | `gemini-3.1-flash-lite` | used when no model is given |
-| `AIPASS_MODELS` | two known ids | fallback list when no extension is attached |
-| `AIPASS_MODEL_FILTER` | `chat` | `all` keeps image/video/audio models |
-| `AIPASS_TOOL_VISIBILITY` | `reasoning` | `text` or `off` |
-| `AIPASS_CONVERSATION_ID` | *(unset)* | pin one conversation |
-| `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
-
-The bridge also serves `POST /v1/chat/completions` and `GET /v1/models`, so any
-OpenAI-compatible client can point at `http://127.0.0.1:8787/v1` for plain
-chat. Only the last user message is forwarded.
-
-## Tests
-
-```bash
-npm test
-```
-
-37 tests, no dependencies, about 2 seconds. `test/harness.mjs` runs the real
-bridge as a subprocess and a scriptable stand-in for the extension, so tests
-drive the actual HTTP surface and the real CLIs rather than mocks of them.
-
-They cover the failures this thing actually hit: that only the newest user
-message is forwarded and never an assistant turn; conversation rotation past a
-locked one; a job surviving the extension disconnecting mid-stream; loopback
-substitution round-tripping so `localhost` never leaves the machine and the
-bytes on disk are unchanged; splitting a rejected turn; dropping a line that
-cannot be sent at any size; a premature `DONE` being ignored; recovery when the
-model drifts into prose; refusing paths outside the project root; and dry run
-leaving the disk untouched.
-
-To add a case, script the model's replies with `scripted([...])` and, where a
-filter is being modelled, pass `reject` to refuse payloads matching a pattern.
-
-## Known limits
-
-- A de.aipass.net tab must stay open. Its content script also holds a port that
-  keeps the MV3 service worker alive; without it Chrome evicts the worker every
-  ~30s. If a tab predates the extension, or Chrome discarded it, the worker
-  re-injects the scripts.
-- Every message appears in the account's chat history — this uses the real product.
-- Long sessions burn credits. Only `gemini-3.1-flash-lite` is free-credit;
-  `npm run models` marks it.
+1. Plain Cline chat.
+2. Read → tool result → final answer.
+3. Read → edit → final answer.
+4. A full read/search → test → edit → test loop.
+5. One custom/MCP tool.
+6. At least two AiPASS model families, including a system-prompt conflict case.
+7. Image and file attachments only after observing and implementing the genuine
+   AiPASS Web upload flow.

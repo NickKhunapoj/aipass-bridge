@@ -94,9 +94,9 @@
       });
 
       if (!res.ok) {
-        const detail = (await res.text().catch(() => '')).slice(0, 300);
-        // A bare HTML error means an edge proxy blocked us before the app saw
-        // the request; these headers say which one.
+        // A bare HTML error can be an edge rejection. Keep only status, size,
+        // and a small allow-list of transport headers; response bodies may
+        // echo user-provided content and must not flow into bridge logs.
         const forensics = ['server', 'via', 'cf-ray', 'retry-after']
           .map((h) => [h, res.headers.get(h)])
           .filter(([, v]) => v)
@@ -104,7 +104,7 @@
           .join(' ');
         throw new Error(
           `aipass returned ${res.status} ${res.statusText} [${body.length} bytes]` +
-          `${forensics ? ` {${forensics}}` : ''}${detail ? ` — ${detail}` : ''}`
+          `${forensics ? ` {${forensics}}` : ''}`
         );
       }
 

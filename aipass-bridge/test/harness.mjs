@@ -5,8 +5,11 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const HERE = new URL('.', import.meta.url).pathname;
+// URL.pathname leaves a leading slash before the drive letter on Windows,
+// which makes spawned test processes look for /C:/... rather than C:/....
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SERVER = path.join(HERE, '..', 'bridge', 'server.mjs');
 export const AGENT = path.join(HERE, '..', 'agent.mjs');
 export const CHAT = path.join(HERE, '..', 'chat.mjs');
@@ -33,8 +36,9 @@ export async function waitFor(check, { timeout = 5000, every = 25 } = {}) {
 
 export async function startBridge(env = {}) {
   const port = await freePort();
+  const sessionStore = path.join(os.tmpdir(), `aipass-sessions-${port}.json`);
   const child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, AIPASS_PORT: String(port), ...env },
+    env: { ...process.env, AIPASS_PORT: String(port), AIPASS_CLINE_SESSION_STORE: sessionStore, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const log = [];
@@ -45,9 +49,10 @@ export async function startBridge(env = {}) {
   return {
     base,
     port,
+    sessionStore,
     log,
     logText: () => log.join(''),
-    stop() { child.kill('SIGKILL'); },
+    stop({ preserveSessionStore = false } = {}) { child.kill('SIGKILL'); if (!preserveSessionStore) fs.rmSync(sessionStore, { force: true }); },
   };
 }
 
@@ -189,6 +194,7 @@ export class FakeExtension {
     this.chats.push(job);
     const emit = {
       text: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'text', text: t }] }),
+      reasoning: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'reasoning', text: t }] }),
       status: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'status', text: t }] }),
       done: (finishReason = 'stop') => this.post('/ext/done', { jobId: job.jobId, finishReason }),
       error: (message) => this.post('/ext/error', { jobId: job.jobId, message }),

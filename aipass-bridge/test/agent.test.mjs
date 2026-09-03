@@ -133,11 +133,11 @@ test('recovers when the model drifts into prose, and gives up after three', asyn
   assert.match(gaveUp.out, /no marker after three replies/);
 });
 
-test('loopback addresses are substituted outbound and restored on disk', async (t) => {
+test('passes ordinary source text transparently and preserves the intended edit', async (t) => {
   const dir = tempDir({ 'cfg.md': 'see http://localhost:3000 and 127.0.0.1:8080\n' });
   const handler = scripted([
     'NEED file cfg.md',
-    'EDIT cfg.md\nFIND\nsee http://LCLHST:3000 and LOOPBACK-IP:8080\nNEW\nsee http://LCLHST:4000 and LOOPBACK-IP:9090\nEND',
+    'EDIT cfg.md\nFIND\nsee http://localhost:3000 and 127.0.0.1:8080\nNEW\nsee http://localhost:4000 and 127.0.0.1:9090\nEND',
     'DONE ports changed',
   ]);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
@@ -145,13 +145,12 @@ test('loopback addresses are substituted outbound and restored on disk', async (
 
   await agent(dir, ['--apply']);
   const sentAll = handler.sent.join('\n');
-  assert.doesNotMatch(sentAll, /localhost/i, 'localhost must never leave this machine');
-  assert.doesNotMatch(sentAll, /127\.0\.0\.1/, 'loopback ip must never leave this machine');
-  assert.match(sentAll, /LCLHST/);
+  assert.match(sentAll, /localhost/i);
+  assert.match(sentAll, /127\.0\.0\.1/);
   assert.equal(fs.readFileSync(path.join(dir, 'cfg.md'), 'utf8'), 'see http://localhost:4000 and 127.0.0.1:9090\n');
 });
 
-test('splits and resends a turn the upstream rejects', async (t) => {
+test('reports an upstream rejection without splitting or changing the content', async (t) => {
   const filler = 'a line of perfectly ordinary prose in the middle of the file\n'.repeat(6);
   const dir = tempDir({ 'big.txt': `ALPHA line\n${filler}BETA line\n` });
   // Rejects only when both markers travel together, which splitting resolves.
@@ -162,11 +161,12 @@ test('splits and resends a turn the upstream rejects', async (t) => {
   t.after(() => ext.disconnect());
 
   const { out } = await agent(dir);
-  assert.match(out, /splitting into 2 parts/);
-  assert.match(out, /✓ read it/);
+  assert.match(out, /aipass returned 403/);
+  assert.doesNotMatch(out, /splitting into/);
+  assert.equal(handler.rejected.length, 1);
 });
 
-test('drops a line that cannot be sent at any size, and keeps going', async (t) => {
+test('does not omit source lines when an upstream request is rejected', async (t) => {
   const dir = tempDir({ 'package.json': '{\n  "scripts": {\n    "x": "node -e \\"fetch()\\"",\n    "build": "next build"\n  }\n}\n' });
   const handler = scripted(['NEED file package.json', 'DONE inspected it'], {
     reject: (t) => /node\s+-e/.test(t),
@@ -175,11 +175,8 @@ test('drops a line that cannot be sent at any size, and keeps going', async (t) 
   t.after(() => ext.disconnect());
 
   const { out } = await agent(dir);
-  assert.match(out, /omitting 1 line/);
-  assert.match(out, /✓ inspected it/);
-  const delivered = handler.sent.join('\n');
-  assert.doesNotMatch(delivered, /node -e/, 'the blocked line must never be accepted upstream');
-  assert.match(delivered, /next build/, 'the rest of the file still gets through');
+  assert.match(out, /aipass returned 403/);
+  assert.doesNotMatch(out, /omitting 1 line/);
   assert.ok(handler.rejected.length > 0, 'the first attempt should have been refused');
 });
 
@@ -242,16 +239,14 @@ test('--conversation pins an explicit one', async (t) => {
   assert.match(out, /continuing/);
 });
 
-test('html comments survive a comment-blocking edge and restore on disk', async (t) => {
+test('html comments round-trip normally when the upstream accepts the message', async (t) => {
   const original = '<!-- BEGIN:nextjs-agent-rules -->\n# Rules\nsome prose here\n<!-- END:nextjs-agent-rules -->\n';
   const dir = tempDir({ 'AGENTS.md': original });
   const handler = scripted([
     'NEED file AGENTS.md',
     'EDIT AGENTS.md\nFIND\n# Rules\nNEW\n# Project Rules\nEND',
     'DONE read and tweaked it',
-  ], {
-    reject: (t) => t.includes('<!--'),   // the edge refuses any HTML comment, as observed
-  });
+  ]);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
   t.after(() => ext.disconnect());
 
@@ -260,8 +255,7 @@ test('html comments survive a comment-blocking edge and restore on disk', async 
   assert.match(out, /✓ read and tweaked it/);
 
   const sent = handler.sent.join('\n');
-  assert.doesNotMatch(sent, /<!--/, 'no HTML comment may reach the edge');
-  assert.match(sent, /CMT-OPEN/, 'it is neutralised, not dropped');
+  assert.match(sent, /<!--/);
 
   // bytes on disk = the original with only the intended edit applied
   assert.equal(
@@ -309,19 +303,14 @@ test('--watch runs a follow-up task on the same conversation', async (t) => {
   assert.equal(new Set(convIds).size, 1, 'watch must stay in one conversation');
 });
 
-test('--assistant binds the created conversation and implies slim', async (t) => {
+test('--assistant fails clearly until its browser form field is verified', async (t) => {
   const dir = tempDir({ 'a.txt': 'x' });
   const ext = await new FakeExtension(bridge.base, { onChat: scripted(['DONE nothing to do']) }).connect();
   t.after(() => ext.disconnect());
 
   const { out } = await agent(dir, ['--assistant', 'asst_abc123']);
-  assert.equal(ext.created.length, 1);
-  assert.equal(ext.created[0].assistant, 'asst_abc123', 'the create job carries the assistant id');
-  assert.equal(ext.created[0].assistantField, 'aiAssistantId', 'and the configured field name');
-  // implies slim: the heavy preamble must be gone
-  const firstTask = ext.chats.find((c) => c.text.includes('Task:'));
-  assert.ok(firstTask, 'a task message was sent');
-  assert.doesNotMatch(firstTask.text, /you write the lines/i);
+  assert.match(out, /custom assistant binding is unavailable/);
+  assert.equal(ext.created.length, 0);
 });
 
 test('read shows line numbers and pages a long file with a range hint', async (t) => {
@@ -401,56 +390,45 @@ test('SEARCH reports cleanly when there are no matches', async (t) => {
   assert.match(handler.sent[1], /no matches for "nonexistent_symbol"/);
 });
 
-test('the task text and preamble are encoded, so process.env never leaves raw', async (t) => {
+test('the task text is sent as written when the upstream accepts it', async (t) => {
   const dir = tempDir({ '.env': 'SECRET=1\n', 'app.js': 'const k = process.env.SECRET;\n' });
-  // Model an edge that blocks any request containing ".env" (a real WAF pattern).
-  const handler = scripted(['NEED file app.js', 'DONE looked at it'], {
-    reject: (t) => /\.env/i.test(t),
-  });
+  const handler = scripted(['NEED file app.js', 'DONE looked at it']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
   t.after(() => ext.disconnect());
 
-  // The task itself mentions process.env — it must be encoded before sending.
   const { out } = await run(AGENT, [
     'List where app.js reads a process.env value', '--root', dir, '--bridge', bridge.base,
   ]);
-  assert.match(out, /✓ looked at it/, 'the run completes despite the .env-blocking edge');
+  assert.match(out, /✓ looked at it/);
   const sent = handler.sent.join('\n');
-  assert.doesNotMatch(sent, /process\.env/, 'process.env must never be sent raw');
-  assert.doesNotMatch(sent, /\.env/, 'no bare .env may be sent raw either');
-  assert.match(sent, /PROCESS-ENV/, 'it is encoded, not dropped');
+  assert.match(sent, /process\.env/);
 });
 
-test('the model can open a file whose name was encoded (.env → DOT-ENV)', async (t) => {
+test('the model can open a file with its original name', async (t) => {
   const dir = tempDir({ '.env': 'TOKEN=abc\n' });
-  // The model sees the encoded name in the listing and copies it back verbatim.
-  const handler = scripted(['NEED file DOT-ENV', 'DONE read the env file']);
+  const handler = scripted(['NEED file .env', 'DONE read the env file']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
   t.after(() => ext.disconnect());
 
   await run(AGENT, ['read the env file', '--root', dir, '--bridge', bridge.base]);
-  // the decode step turns DOT-ENV back into .env, so the real file is read
   const result = handler.sent[1];
-  assert.match(result, /TOKEN=abc/, 'the real .env file was read and its contents returned (encoded)');
+  assert.match(result, /TOKEN=abc/, 'the real .env file was read and its contents returned');
 });
 
-test('tag-shaped content passes a tag-blocking edge and restores byte-for-byte', async (t) => {
+test('tag-shaped content round-trips when the upstream accepts the message', async (t) => {
   const original = 'export default function Layout() {\n  return (\n    <html lang="en">\n      <body>{children}</body>\n    </html>\n  );\n}\n';
   const dir = tempDir({ 'layout.tsx': original });
   const handler = scripted([
     'NEED file layout.tsx',
     'EDIT layout.tsx\nFIND\n    <html lang="en">\nNEW\n    <html lang="th">\nEND',
     'DONE switched the language',
-  ], {
-    reject: (t) => /<[a-zA-Z/]/.test(t),   // the edge blocks any tag-opening <
-  });
+  ]);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
   t.after(() => ext.disconnect());
 
   await agent(dir, ['--apply']);
   const sent = handler.sent.join('\n');
-  assert.doesNotMatch(sent, /<[a-zA-Z/]/, 'no tag-opening < may reach the edge');
-  assert.match(sent, /TAG-LT/, 'tags are encoded, not dropped');
+  assert.match(sent, /<[a-zA-Z/]/);
   assert.equal(
     fs.readFileSync(path.join(dir, 'layout.tsx'), 'utf8'),
     original.replace('lang="en"', 'lang="th"'),

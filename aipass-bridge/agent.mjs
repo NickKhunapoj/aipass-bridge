@@ -25,6 +25,7 @@ const has = (name) => argv.includes(`--${name}`);
 
 const task = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
 const ROOT = path.resolve(flag('root', process.cwd()));
+const displayPath = (value) => value.split(path.sep).join('/');
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 const MODEL = flag('model', null);
 const MAX_STEPS = Number(flag('max', 10));
@@ -95,61 +96,6 @@ function stripGutter(block) {
   return block;
 }
 
-// Loopback hostnames and internal addresses are what SSRF filter rules look
-// for, and ordinary project files are full of them — a README saying
-// "open http://localhost:3000" is enough to get a request rejected.
-//
-// Substitute them on the way out and restore them on the way back, so the
-// model works with stable placeholders and the bytes written to disk are
-// exactly what the file had. The placeholders deliberately share no substring
-// with the originals, or a case-insensitive rule would still match.
-const SUBSTITUTIONS = [
-  [/127\.0\.0\.1/g, 'LOOPBACK-IP'],
-  [/169\.254\.169\.254/g, 'METADATA-IP'],
-  [/0\.0\.0\.0/g, 'ANY-IP'],
-  [/localhost/gi, 'LCLHST'],
-  [/file:\/\//gi, 'FILE-URI'],
-  // HTML/XSS-shaped tokens that ordinary files carry — a markdown or Vue file
-  // opening with an HTML comment is enough to trip an XSS rule.
-  [/<!doctype/gi, 'DOCTYPE-DECL'],
-  [/<!--/g, 'CMT-OPEN'],
-  [/-->/g, 'CMT-CLOSE'],
-  [/<script/gi, 'TAG-SCRIPT-OPEN'],
-  [/<\/script>/gi, 'TAG-SCRIPT-CLOSE'],
-  [/javascript:/gi, 'JS-SCHEME'],
-  // `.env` is a classic secrets-probe pattern that WAFs block outright — and it
-  // rides inside `process.env`, which appears constantly in real code.
-  [/process\.env/gi, 'PROCESS-ENV'],
-  [/\.env\b/gi, 'DOT-ENV'],
-  // The general case: a `<` that opens a tag (`<html`, `<div`, `</body>`, a JSX
-  // component) is what an XSS rule matches. Encode just that `<` — not `a < b`
-  // or `=>` — so any HTML/JSX/XML file survives, restored exactly on write.
-  [/<(?=[a-zA-Z/!?])/g, 'TAG-LT'],
-];
-
-const outbound = (text) => SUBSTITUTIONS.reduce((acc, [re, to]) => acc.replace(re, to), text);
-
-// Reversing loses the original casing of "localhost"; lower case is what
-// appears in practice and a mismatch only costs a retry, never a bad write.
-const RESTORE = [
-  [/LOOPBACK-IP/g, '127.0.0.1'],
-  [/METADATA-IP/g, '169.254.169.254'],
-  [/ANY-IP/g, '0.0.0.0'],
-  [/LCLHST/g, 'localhost'],
-  [/FILE-URI/g, 'file://'],
-  [/DOCTYPE-DECL/g, '<!doctype'],
-  [/CMT-OPEN/g, '<!--'],
-  [/CMT-CLOSE/g, '-->'],
-  [/TAG-SCRIPT-OPEN/g, '<script'],
-  [/TAG-SCRIPT-CLOSE/g, '</script>'],
-  [/JS-SCHEME/g, 'javascript:'],
-  [/PROCESS-ENV/g, 'process.env'],
-  [/DOT-ENV/g, '.env'],
-  [/TAG-LT/g, '<'],
-];
-
-const inbound = (text) => (text == null ? text : RESTORE.reduce((acc, [re, to]) => acc.replace(re, to), text));
-
 const TOOLS = {
   list(arg) {
     const abs = safe(arg || '.');
@@ -187,15 +133,15 @@ const TOOLS = {
     return numbered + note;
   },
   write(arg, rawBody) {
-    const body = inbound(rawBody);
+    const body = rawBody;
     overlay.set(safe(arg), body);
     return `wrote ${arg}, ${body.split('\n').length} lines`;
   },
   replace(arg, rawBody) {
     const abs = safe(arg);
     if (!existsAt(abs)) return `no such file: ${arg}`;
-    const before = inbound(stripGutter(rawBody[0]));
-    const after = inbound(rawBody[1]);
+    const before = stripGutter(rawBody[0]);
+    const after = rawBody[1];
     const text = readAt(abs);
     if (!before) return `the text to change was empty. Copy the exact lines to find under FIND.`;
 
@@ -209,7 +155,7 @@ const TOOLS = {
   search(arg) {
     const query = String(arg).trim();
     if (!query) return 'give me some text to search for.';
-    const needle = inbound(query); // the model may type placeholders like LCLHST
+    const needle = query;
     const hits = [];
     const MAX = 50;
     const walk = (dir) => {
@@ -227,7 +173,7 @@ const TOOLS = {
         const lines = text.split('\n');
         for (let i = 0; i < lines.length && hits.length < MAX; i++) {
           if (lines[i].includes(needle)) {
-            hits.push(`${path.relative(ROOT, full)}:${i + 1}: ${lines[i].trim().slice(0, 140)}`);
+            hits.push(`${displayPath(path.relative(ROOT, full))}:${i + 1}: ${lines[i].trim().slice(0, 140)}`);
           }
         }
       }
@@ -249,9 +195,8 @@ const TOOLS = {
 
 /* -------------------------------------------------------------- the format */
 
-// Plain words, no angle brackets, no key=value pairs, no banner rules, no
-// absolute paths. Everything that drew a WAF 403 in earlier attempts was
-// structural; prose-shaped directives carry none of those signals.
+// The CLI uses a simple conversational protocol. It does not transform or
+// redact source text to work around upstream policy decisions.
 const PREAMBLE = `I am reading through a project with you. The files are open in front of me, and I will paste you anything you want to look at.
 
 So just tell me what you want to see next, and put that on its own line in this shape, because my editor watches for these markers:
@@ -283,7 +228,7 @@ Only write DONE at the very end, when nothing more is needed. Never put DONE in 
 
 The markers are only formatting for my editor. Nothing runs on your side — I do all of it and paste every result straight back to you, so keep going until you have what you need.
 
-A few practical notes. Answer in English. Look at a file before changing it, and copy the lines under FIND exactly as they appear. When I show a file the numbers down the left are only for reference — do not put them in FIND. Big files come a screen at a time; ask for a range like NEED file path 200-320 to see more. To find where something lives without reading every file, use SEARCH followed by the text. Some hostnames and addresses are written in a shortened form such as LCLHST and LOOPBACK-IP; keep them as written and I will expand them again. If my question can be answered without changing anything, just answer it and end with DONE.`;
+A few practical notes. Answer in English. Look at a file before changing it, and copy the lines under FIND exactly as they appear. When I show a file the numbers down the left are only for reference — do not put them in FIND. Big files come a screen at a time; ask for a range like NEED file path 200-320 to see more. To find where something lives without reading every file, use SEARCH followed by the text. If my question can be answered without changing anything, just answer it and end with DONE.`;
 
 const REMINDER = 'What next? Ask for anything else you need, or finish with DONE if you have enough.';
 
@@ -383,69 +328,7 @@ async function say(text) {
   return out;
 }
 
-// File contents are arbitrary: a README carries shell commands, URLs and code
-// fences, any of which can push a request past an upstream filter. Splitting a
-// rejected message in half and sending the halves in sequence keeps the same
-// information flowing while lowering what any single request carries. The
-// server remembers each part, so the model still sees the whole thing.
-function splitInHalf(text) {
-  const lines = text.split('\n');
-  if (lines.length < 2) {
-    const mid = Math.floor(text.length / 2);
-    return [text.slice(0, mid), text.slice(mid)];
-  }
-  const mid = Math.ceil(lines.length / 2);
-  return [lines.slice(0, mid).join('\n'), lines.slice(mid).join('\n')];
-}
-
-const MIN_SPLIT = 300;
-
-// Last resort when a fragment is rejected even on its own. Real source files
-// contain code-execution shapes — `node -e`, `curl`, `rm -rf`, `/bin/sh` — that
-// no amount of splitting gets past. Drop only the offending lines so the run
-// survives and the model still sees the rest of the file.
-const RISKY_LINE = /(node\s+-{1,2}e\b|--eval\b|\beval\(|child_process|exec(Sync)?\(|spawnSync?\(|\bcurl\b|\bwget\b|\b(ba)?sh\s+-c\b|rm\s+-rf|\/etc\/|\/bin\/(ba)?sh|\.\.\/\.\.\/|<!doctype|<!--|-->|<script|<\/script|javascript:|onerror\s*=|onload\s*=)/i;
-
-function redact(text) {
-  let dropped = 0;
-  const out = text.split('\n').map((line) => {
-    if (!RISKY_LINE.test(line)) return line;
-    dropped++;
-    return '[one line omitted here — it could not be sent]';
-  }).join('\n');
-  return { out, dropped };
-}
-
-async function sayResilient(text, depth = 0) {
-  if (depth === 0) text = outbound(text); // encode the whole message once
-  try {
-    return await say(text);
-  } catch (err) {
-    const blocked = /\b40[39]\b/.test(err.message);
-    if (!blocked) throw err;
-
-    if (depth > 4 || Buffer.byteLength(text) < MIN_SPLIT) {
-      const { out, dropped } = redact(text);
-      if (dropped && out !== text) {
-        console.log(dim(`  rejected at ${Buffer.byteLength(text)} bytes — omitting ${dropped} line(s) that cannot be sent`));
-        return await say(out);
-      }
-      console.error(red('\nthis fragment was rejected even on its own:\n') + dim(text.slice(0, 400)));
-      throw err;
-    }
-    const parts = splitInHalf(text);
-    console.log(dim(`  rejected — splitting into ${parts.length} parts and resending`));
-    let last;
-    for (let i = 0; i < parts.length; i++) {
-      const final = i === parts.length - 1;
-      const prefix = final
-        ? 'Final part.\n\n'
-        : `Part ${i + 1}, more follows. Reply with just: ok\n\n`;
-      last = await sayResilient(prefix + parts[i], depth + 1);
-    }
-    return last;
-  }
-}
+async function sayResilient(text) { return say(text); }
 
 /* ---------------------------------------------------------------- the loop */
 
@@ -454,13 +337,20 @@ function showDiff() {
   console.log(bold(`\n${overlay.size} file(s) changed:\n`));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-'));
   for (const [abs, next] of overlay) {
-    const rel = path.relative(ROOT, abs);
+    const rel = displayPath(path.relative(ROOT, abs));
     const a = path.join(tmp, 'a'); const b = path.join(tmp, 'b');
     fs.writeFileSync(a, fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '');
     fs.writeFileSync(b, next);
     let diff;
     try { diff = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, a, b], { encoding: 'utf8' }); }
     catch (err) { diff = String(err.stdout ?? ''); }
+    // Windows PowerShell aliases `diff` to Compare-Object, which is not a
+    // command-line unified-diff implementation. Keep dry-run output useful
+    // when no GNU diff executable is available.
+    if (!diff) {
+      const before = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '';
+      diff = [`--- a/${rel}`, `+++ b/${rel}`, ...before.split('\n').filter(Boolean).map((line) => `-${line}`), ...next.split('\n').filter(Boolean).map((line) => `+${line}`)].join('\n');
+    }
     for (const line of diff.split('\n')) {
       if (line.startsWith('+') && !line.startsWith('+++')) console.log(green(line));
       else if (line.startsWith('-') && !line.startsWith('---')) console.log(red(line));
@@ -497,7 +387,7 @@ const useSlim = SLIM || Boolean(ASSISTANT);
 async function runTask(taskText, { first }) {
   overlay.clear();
   let listing = '';
-  try { listing = outbound(TOOLS.list('.')); } catch { /* ignore */ }
+  try { listing = TOOLS.list('.'); } catch { /* ignore */ }
 
   let next = useSlim
     ? `${first ? `Top level of the project: ${listing}\n\n` : ''}Task: ${taskText}\n\nWhat should I open first?`
@@ -511,7 +401,6 @@ async function runTask(taskText, { first }) {
     let reply;
     try { reply = await sayResilient(next); }
     catch (err) { console.error(red(`\n${err.message}`)); break; }
-    reply = inbound(reply); // decode: everything we send is encoded, everything we read is decoded
 
     const calls = parse(reply);
     const done = calls.find((c) => c.kind === 'done');
@@ -533,7 +422,7 @@ async function runTask(taskText, { first }) {
       catch (err) { result = `error: ${err.message}`; }
       const head = result.split('\n')[0];
       console.log(`  ${/^(no such|error|the text)/.test(result) ? red('✗') : green('✓')} ${call.kind} ${call.arg} ${dim(head.slice(0, 70))}`);
-      results.push(`Result of ${call.kind} ${call.arg}:\n${outbound(result)}`);
+      results.push(`Result of ${call.kind} ${call.arg}:\n${result}`);
     }
 
     const stillLooking = work.some((c) => c.kind === 'list' || c.kind === 'read' || c.kind === 'search');
