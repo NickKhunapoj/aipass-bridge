@@ -130,6 +130,18 @@ const KIND_PATTERNS = [
 
 const kindOf = (id) => KIND_BY_ID.get(id) ?? KIND_PATTERNS.find(([, re]) => re.test(id))?.[0] ?? 'chat';
 
+// The submit route validates `provider` against its own small enum — veo, sora,
+// seedance, wan — which is NOT the model's display provider (seedance's is
+// "byteplus"). It is derived from the id prefix, the same way the app derives
+// it, and a body carrying the wrong one is rejected as "Invalid request body".
+const VIDEO_PROVIDERS = [
+  ['seedance', /^seedance/i],
+  ['veo', /^veo/i],
+  ['sora', /^sora/i],
+  ['wan', /^wan/i],
+];
+const videoProviderOf = (id) => VIDEO_PROVIDERS.find(([, re]) => re.test(id))?.[0];
+
 // Which video models accept a resolution, and which. The app gates only this
 // one option by model — everything else it sends whenever the caller set it —
 // so the bridge mirrors that rather than inventing stricter rules.
@@ -183,11 +195,13 @@ function extractModels(decoded) {
         // surface worth reporting; everything else is uniform.
         options: kind === 'video'
           ? {
+              provider: videoProviderOf(id) ?? null,
               aspectRatio: true,
               stylePreprompt: true,
-              duration: true,
-              cameraFixed: true,
-              generateAudio: true,
+              // Only seedance takes these; the app omits them for everything else.
+              duration: /^seedance/i.test(id),
+              cameraFixed: /^seedance/i.test(id),
+              generateAudio: /^seedance/i.test(id),
               resolutions: VIDEO_RESOLUTIONS[id] ?? null,
               images: VIDEO_IMAGE_LIMITS[id] ?? null,
             }
@@ -718,8 +732,10 @@ const oaiError = (res, status, message, type = 'invalid_request_error') =>
 // set, so this does the same rather than inventing stricter rules of its own.
 function videoOptionsFor(modelId, payload) {
   if (kindOf(modelId) !== 'video') return undefined;
-  const model = cachedModels().find((m) => m.id === modelId);
   const bool = (v) => (typeof v === 'boolean' ? v : undefined);
+  // The app attaches these four only for a seedance model; veo and sora take
+  // the prompt, the aspect ratio and the style, and nothing else.
+  const seedance = /^seedance/i.test(modelId);
   // A model absent from the table has no resolution concept at all — the web UI
   // shows no control for it and never puts one on the wire. The app's own guard
   // is looser (it passes anything for an unlisted model) but only because the UI
@@ -731,16 +747,15 @@ function videoOptionsFor(modelId, payload) {
   }
   const duration = Number(payload.duration);
   return {
-    // The submit route wants the provider id, which is the model's own.
-    provider: model?.providerId ?? undefined,
+    provider: videoProviderOf(modelId),
     ...(payload.aspect_ratio || payload.aspectRatio ? { aspectRatio: String(payload.aspect_ratio ?? payload.aspectRatio) } : {}),
     // A style is sent as its preprompt text, not as an id: the app looks the
     // preset up in /loaders/list-video-styles and posts the `preprompt` field.
     ...(payload.style_preprompt || payload.stylePreprompt ? { stylePreprompt: String(payload.style_preprompt ?? payload.stylePreprompt) } : {}),
-    ...(resolution && allowed?.includes(resolution) ? { resolution } : {}),
-    ...(Number.isFinite(duration) && duration > 0 ? { duration } : {}),
-    ...(bool(payload.camera_fixed ?? payload.cameraFixed) !== undefined ? { cameraFixed: bool(payload.camera_fixed ?? payload.cameraFixed) } : {}),
-    ...(bool(payload.generate_audio ?? payload.generateAudio) !== undefined ? { generateAudio: bool(payload.generate_audio ?? payload.generateAudio) } : {}),
+    ...(seedance && resolution && allowed?.includes(resolution) ? { resolution } : {}),
+    ...(seedance && Number.isFinite(duration) && duration > 0 ? { duration } : {}),
+    ...(seedance && bool(payload.camera_fixed ?? payload.cameraFixed) !== undefined ? { cameraFixed: bool(payload.camera_fixed ?? payload.cameraFixed) } : {}),
+    ...(seedance && bool(payload.generate_audio ?? payload.generateAudio) !== undefined ? { generateAudio: bool(payload.generate_audio ?? payload.generateAudio) } : {}),
   };
 }
 

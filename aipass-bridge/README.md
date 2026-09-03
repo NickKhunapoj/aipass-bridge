@@ -690,7 +690,7 @@ The submit body, and what the bridge maps onto it:
 | aipass field | request field | notes |
 | --- | --- | --- |
 | `prompt` | the user message | |
-| `provider` | — | taken from the model's own `provider` |
+| `provider` | — | one of `veo`, `sora`, `seedance`, `wan`, derived from the id prefix. **Not** the model's display provider — seedance's is `byteplus`, and sending that is a `400 Invalid request body` |
 | `modelId` | `model` | |
 | `aspectRatio` | `aspect_ratio` | 16:9, 9:16, 1:1, 4:3, 3:4, and 21:9 on seedance |
 | `stylePreprompt` | `style_preprompt` | the preset's **preprompt text**, not its id |
@@ -700,6 +700,9 @@ The submit body, and what the bridge maps onto it:
 | `generateAudio` | `generate_audio` | |
 
 Every one of these is omitted unless set, exactly as the web client omits them.
+`resolution`, `duration`, `cameraFixed` and `generateAudio` go further: the app
+attaches them only when the model id starts with `seedance`, so the bridge drops
+them for veo and sora rather than sending fields those models never receive.
 
 ### The option surface differs per model
 
