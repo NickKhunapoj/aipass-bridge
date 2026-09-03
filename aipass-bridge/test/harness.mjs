@@ -138,7 +138,10 @@ export const quotaFixture = ({ limit = '10000000000', used = '167042858', availa
 // filtering are both exercised against shapes the server actually sends.
 const DEFAULT_MODELS = [
   { id: 'gemini-3.1-flash-lite', displayName: 'Gemini 3.1 Flash Lite', provider: 'google', providerName: 'Google', isFreeCredit: true, ready: true },
-  { id: 'claude-sonnet-5@default', displayName: 'Claude Sonnet 5', provider: 'anthropic', providerName: 'Anthropic', ready: true },
+  { id: 'claude-sonnet-5@default', displayName: 'Claude Sonnet 5', provider: 'anthropic', providerName: 'Anthropic', ready: true, thinkingConfig: { supportedLevels: ['low', 'medium', 'high'] } },
+  // Opus is the one model that advertises a fourth level, which is why the
+  // levels have to come from the model rather than a hardcoded list.
+  { id: 'claude-opus-5@azure', displayName: 'Claude Opus 5', provider: 'anthropic', providerName: 'Anthropic', ready: true, thinkingConfig: { supportedLevels: ['low', 'medium', 'high', 'max'] } },
   { id: 'veo-3.1-fast-generate-001', displayName: 'Veo 3.1 Fast', provider: 'google', providerName: 'Google', ready: true },
   { id: 'gpt-image-2', displayName: 'GPT-Image-2', provider: 'openai', providerName: 'OpenAI', ready: true },
   { id: 'gemini-3-pro-image', displayName: 'Nano Banana Pro', provider: 'google', providerName: 'Google', ready: true },

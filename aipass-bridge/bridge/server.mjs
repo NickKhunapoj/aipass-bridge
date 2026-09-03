@@ -236,6 +236,15 @@ const cachedModels = () =>
     ? modelCache.models
     : MODELS_FALLBACK.map((id) => ({ id, name: id, provider: null, free: false, ready: true, selectable: true, kind: kindOf(id), thinking: null }));
 
+// The thinking level a model will actually accept, or undefined. Falls back to
+// the common three when the model list has not been fetched yet, so a request
+// made before the first refresh is not silently stripped.
+function thinkingLevelFor(modelId, level) {
+  const known = cachedModels().find((m) => m.id === modelId)?.thinking;
+  const allowed = Array.isArray(known) && known.length ? known : ['low', 'medium', 'high'];
+  return allowed.includes(level) ? level : undefined;
+}
+
 async function listModels({ force = false } = {}) {
   if (!force && modelCache.models.length && Date.now() - modelCache.at < MODEL_TTL_MS) return modelCache.models;
   if (!extClients.size) return cachedModels();
@@ -446,8 +455,31 @@ function isPrivateHost(host) {
   return false;
 }
 
-// Fetch remote image and convert to Base64 Data URI with SSRF guard
-async function fetchRemoteImageAsDataUri(urlStr) {
+// What may be attached to a message. Images go to vision models; the document
+// types are what the web UI's own file picker offers. Anything else is refused
+// here rather than uploaded and rejected upstream, where the error is vaguer.
+const DOCUMENT_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+]);
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+const isAllowedAttachment = (type, kind) =>
+  kind === 'image' ? type.startsWith('image/') : type.startsWith('image/') || DOCUMENT_TYPES.has(type);
+
+// Fetch a remote attachment and convert it to a Base64 data URI, with the SSRF
+// guard. `kind` narrows what content-type is acceptable: an image_url part will
+// take nothing but an image, a file part will also take a document.
+async function fetchRemoteAsDataUri(urlStr, kind = 'image') {
   const parsed = new URL(urlStr);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`unsupported protocol: ${parsed.protocol}`);
@@ -461,17 +493,39 @@ async function fetchRemoteImageAsDataUri(urlStr) {
     signal: AbortSignal.timeout(15_000),
     headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
   });
-  if (!res.ok) throw new Error(`remote image fetch failed with status ${res.status}`);
+  if (!res.ok) throw new Error(`remote fetch failed with status ${res.status}`);
   const contentType = (res.headers.get('content-type') || 'image/jpeg').split(';')[0].trim();
-  if (!contentType.startsWith('image/')) {
-    throw new Error(`expected image content-type, got ${contentType}`);
+  if (!isAllowedAttachment(contentType, kind)) {
+    throw new Error(`unsupported content-type: ${contentType}`);
   }
   const arrayBuffer = await res.arrayBuffer();
-  if (arrayBuffer.byteLength > 10 * 1024 * 1024) {
-    throw new Error(`image size too large: ${arrayBuffer.byteLength} bytes`);
+  if (arrayBuffer.byteLength > MAX_ATTACHMENT_BYTES) {
+    throw new Error(`attachment too large: ${arrayBuffer.byteLength} bytes`);
   }
   const base64 = Buffer.from(arrayBuffer).toString('base64');
   return `data:${contentType};base64,${base64}`;
+}
+
+// The mime type a data URI declares, or '' when it is not a data URI.
+const dataUriType = (s) => (s.match(/^data:([^;,]+)/)?.[1] || '').toLowerCase();
+
+// A filename the upstream file picker would have produced, so an attachment
+// without one still arrives named rather than as `undefined`.
+function defaultFilename(mediaType) {
+  const ext = ({
+    'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-powerpoint': 'ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'text/plain': 'txt',
+    'text/markdown': 'md',
+    'text/csv': 'csv',
+    'application/json': 'json',
+  })[mediaType] || (mediaType.split('/')[1] || 'bin').replace(/^jpeg$/, 'jpg');
+  return `attachment.${ext}`;
 }
 
 // Extract multimodal parts (text and images) from OpenAI formatted messages
@@ -500,8 +554,8 @@ async function extractUserParts(messages) {
           textPieces.push(t);
           parts.push({ type: 'text', text: t });
         }
-      } else if (item.type === 'image_url') {
-        const rawUrl = item.image_url?.url || item.url || (typeof item.image === 'string' ? item.image : null);
+      } else if (item.type === 'image_url' || item.type === 'image') {
+        const rawUrl = item.image_url?.url || item.url || item.image || item.data || null;
         if (typeof rawUrl === 'string' && rawUrl.trim()) {
           const urlStr = rawUrl.trim();
           let dataUri = '';
@@ -509,7 +563,7 @@ async function extractUserParts(messages) {
             dataUri = urlStr;
           } else if (/^https?:\/\//i.test(urlStr)) {
             try {
-              dataUri = await fetchRemoteImageAsDataUri(urlStr);
+              dataUri = await fetchRemoteAsDataUri(urlStr, 'image');
             } catch (err) {
               log(`warning: failed to fetch remote image ${urlStr}: ${err.message}`);
             }
@@ -521,30 +575,50 @@ async function extractUserParts(messages) {
             });
           }
         }
-      } else if (item.type === 'image' || item.type === 'file') {
-        // Same handling as image_url: a remote URL goes through the SSRF guard
-        // and arrives as a data URI, so the extension never fetches it.
-        const raw = item.image || item.url || item.data || '';
+      } else if (item.type === 'file') {
+        // OpenAI's own shape is {type:'file', file:{filename, file_data}}; the
+        // looser {url}/{data} spellings are accepted too. A remote URL goes
+        // through the SSRF guard and arrives as a data URI, so the extension is
+        // never asked to fetch it with the user's cookies.
+        const raw = item.file?.file_data || item.file?.url || item.url || item.data || '';
         if (typeof raw === 'string' && raw.trim()) {
-          const s = raw.trim();
+          const str = raw.trim();
           let dataUri = '';
-          if (s.startsWith('data:')) {
-            dataUri = s;
-          } else if (/^https?:\/\//i.test(s)) {
+          if (str.startsWith('data:')) {
+            const declared = dataUriType(str);
+            if (isAllowedAttachment(declared, 'file')) dataUri = str;
+            else log(`warning: refusing attachment of type ${declared || 'unknown'}`);
+          } else if (/^https?:\/\//i.test(str)) {
             try {
-              dataUri = await fetchRemoteImageAsDataUri(s);
+              dataUri = await fetchRemoteAsDataUri(str, 'file');
             } catch (err) {
-              log(`warning: failed to fetch remote image ${s}: ${err.message}`);
+              log(`warning: failed to fetch remote file ${str}: ${err.message}`);
             }
           }
-          if (dataUri) parts.push({ type: 'image', image: dataUri });
+          if (dataUri) {
+            const mediaType = dataUriType(dataUri) || 'application/octet-stream';
+            // An image sent as a file part is still an image to the model.
+            if (mediaType.startsWith('image/')) {
+              parts.push({ type: 'image', image: dataUri });
+            } else {
+              parts.push({
+                type: 'file',
+                mediaType,
+                filename: item.file?.filename || item.filename || defaultFilename(mediaType),
+                data: dataUri,
+              });
+            }
+          }
         }
       }
     }
 
+    // A message that is nothing but an attachment still needs text, or the
+    // upstream composer treats it as empty. Name the file when there is one.
+    const named = parts.find((p) => p.type === 'file')?.filename;
     const text = textPieces.join('\n').trim();
     return {
-      text: text || (parts.length ? '[Image]' : ''),
+      text: text || (named ? `[${named}]` : parts.length ? '[Image]' : ''),
       parts: parts.length ? parts : (text ? [{ type: 'text', text }] : [])
     };
   }
@@ -592,10 +666,12 @@ async function chatCompletions(req, res) {
   // Not an OpenAI field, so a client that knows about it can send either
   // spelling; otherwise the bridge default applies.
   const ratio = String(payload.aspect_ratio ?? payload.imageAspectRatio ?? aspectRatio).trim() || '1:1';
-  // Models that advertise thinkingConfig accept low | medium | high; everything
-  // else ignores it, so an unknown value costs nothing.
+  // The levels are per model — most reasoning models take low | medium | high,
+  // but Claude Opus also advertises `max` — so the model's own supportedLevels
+  // decide. A level the model does not list is dropped rather than sent.
   const thinking = String(payload.thinking_level ?? payload.thinkingLevel ?? '').trim().toLowerCase();
-  const thinkingLevel = ['low', 'medium', 'high'].includes(thinking) ? thinking : undefined;
+  const thinkingLevel = thinking ? thinkingLevelFor(model, thinking) : undefined;
+  if (thinking && !thinkingLevel) log(`warning: ${model} does not offer thinking level ${thinking}`);
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
 
