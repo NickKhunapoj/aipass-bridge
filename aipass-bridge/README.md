@@ -636,10 +636,13 @@ filter is being modelled, pass `reject` to refuse payloads matching a pattern.
 
 ## Known limits
 
-- A de.aipass.net tab must stay open. Its content script also holds a port that
-  keeps the MV3 service worker alive; without it Chrome evicts the worker every
-  ~30s. If a tab predates the extension, or Chrome discarded it, the worker
-  re-injects the scripts.
+- A de.aipass.net tab must stay open for a request to run. If a tab predates the
+  extension, or Chrome discarded it, the worker re-injects the scripts.
+- Chrome evicts an idle MV3 service worker after ~30s, and inbound SSE bytes do
+  not count as activity. Two things hold it open: the content script's port while
+  a tab is there, and an offscreen document when one is not — so the bridge keeps
+  reporting the extension accurately instead of flapping between attached and
+  gone whenever the last tab closes.
 - Every message appears in the account's chat history — this uses the real product.
 - Long sessions burn credits. Only `gemini-3.1-flash-lite` is free-credit;
   `npm run models` marks it, and `npm run credits` says what is left.
