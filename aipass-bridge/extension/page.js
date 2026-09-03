@@ -444,7 +444,14 @@
       });
       if (!res.ok) {
         const detail = (await res.text().catch(() => '')).slice(0, 500);
-        throw new Error(`video-generation returned ${res.status}: ${detail}`);
+        // The route validates the body as a whole and says only "Invalid
+        // request body", so name the fields that were sent — the offender is
+        // one of them, and otherwise there is nothing to go on.
+        const sent = Object.entries(body)
+          .filter(([k]) => k !== 'prompt')
+          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+          .join(' ');
+        throw new Error(`video-generation returned ${res.status}: ${detail} — sent ${sent}`);
       }
       const started = await res.json();
       if (started?.error) throw new Error(String(started.error));

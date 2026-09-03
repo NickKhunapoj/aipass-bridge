@@ -628,7 +628,9 @@ test('a video model is submitted as a job, not sent as a chat', async (t) => {
   assert.ok(job, 'a video model must not go through /actions/send-message');
   assert.equal(job.kind, 'video');
   assert.equal(job.text, 'a street at night');
-  assert.equal(job.provider, 'byteplus', 'the submit route wants the provider id');
+  // The submit route validates provider against veo | sora | seedance | wan.
+  // seedance's *display* provider is byteplus, and sending that is a 400.
+  assert.equal(job.provider, 'seedance');
 
   await post({ model: 'gemini-3.1-flash-lite', messages: [{ role: 'user', content: 'hi' }] });
   assert.equal(ext.videos.length, 1, 'a chat model must still stream');
@@ -653,9 +655,18 @@ test('video options are passed through, and resolution is gated by model', async
   assert.equal(job.generateAudio, false, 'false must survive, not be dropped as falsy');
   assert.equal(job.stylePreprompt, 'Documentary style, natural camera work.');
 
-  // veo lists no resolutions, so the app never sends one
-  await post({ model: 'veo-3.1-fast-generate-001', messages: [{ role: 'user', content: 'a street' }], resolution: '1080p' });
-  assert.equal(ext.videos.at(-1).resolution, undefined, 'veo takes no resolution');
+  // veo takes the prompt, the ratio and the style — nothing else
+  await post({
+    model: 'veo-3.1-fast-generate-001', messages: [{ role: 'user', content: 'a street' }],
+    resolution: '1080p', duration: 8, camera_fixed: true, generate_audio: false, aspect_ratio: '16:9',
+  });
+  const veo = ext.videos.at(-1);
+  assert.equal(veo.provider, 'veo');
+  assert.equal(veo.aspectRatio, '16:9', 'the ratio still goes through');
+  assert.equal(veo.resolution, undefined, 'veo takes no resolution');
+  assert.equal(veo.duration, undefined, 'the seedance-only options are dropped');
+  assert.equal(veo.cameraFixed, undefined);
+  assert.equal(veo.generateAudio, undefined);
 
   // seedance takes 480p and 720p only
   await post({ model: 'seedance-2.0-mini', messages: [{ role: 'user', content: 'a street' }], resolution: '4k' });
