@@ -12,7 +12,26 @@
   const inflight = new Map();
   // Above this, an image goes back as a link rather than as bytes: the bridge
   // caps a POST body at 8 MB and base64 costs a third on top.
-  const MAX_INLINE_IMAGE = 5 * 1024 * 1024;
+  // How many bytes of generated media may be carried back inline as a data URI.
+  // Video and music are much larger than an image and the base64 costs another
+  // third, but a same-origin link is useless outside this browser — so they get
+  // a bigger allowance rather than a link by default.
+  const INLINE_CAP = {
+    image: 5 * 1024 * 1024,
+    audio: 25 * 1024 * 1024,
+    video: 50 * 1024 * 1024,
+    file: 10 * 1024 * 1024,
+  };
+
+  // image/png -> image, video/mp4 -> video, audio/wav -> audio. Anything else
+  // is a file, which the bridge renders as a link rather than an image tag.
+  const mediaKind = (mediaType) => {
+    const t = String(mediaType || '').toLowerCase();
+    if (t.startsWith('image/')) return 'image';
+    if (t.startsWith('video/')) return 'video';
+    if (t.startsWith('audio/')) return 'audio';
+    return '';
+  };
   // Frames that legitimately carry nothing we need.
   const QUIET_FRAMES = new Set([
     'start', 'start-step', 'finish-step', 'text-start', 'text-end',
@@ -303,21 +322,27 @@
               push('status', `[${name}] returned ${size} chars`);
               break;
             }
-            // A generated image arrives as a file part. Its URL is usually
-            // same-origin and needs the session cookie, which only this page
-            // has — so fetch it here and hand back a data URI. Anything already
-            // absolute, or too big to carry, goes back as a plain URL.
+            // Generated media — an image, a video, a music clip — all arrive as
+            // a file part. Its URL is usually same-origin and needs the session
+            // cookie, which only this page has, so it is fetched here and handed
+            // back as a data URI. Anything already absolute, or too big to
+            // carry, goes back as a plain URL instead.
             case 'file': {
               const url = evt.url ?? evt.data?.url ?? '';
               if (!url) break;
               const mediaType = evt.mediaType ?? evt.data?.mediaType ?? '';
-              if (/^data:/i.test(url)) { push('image', url); break; }
+              // The kind decides how the client renders it: an mp4 in an image
+              // tag is a broken image, not a video.
+              const kind = mediaKind(mediaType) || (/^data:/i.test(url) ? mediaKind(url.slice(5)) : '') || 'file';
+              if (/^data:/i.test(url)) { push(kind, url); break; }
               let carried = '';
               if (!/^https?:\/\//i.test(url) || url.startsWith(location.origin)) {
                 try {
                   const r = await fetch(url, { credentials: 'include', signal: controller.signal });
                   const blob = await r.blob();
-                  if (blob.size <= MAX_INLINE_IMAGE) {
+                  const cap = INLINE_CAP[kind] ?? INLINE_CAP.file;
+                  push('status', `[${kind}] ${mediaType || blob.type || 'unknown type'}, ${(blob.size / 1048576).toFixed(2)} MB`);
+                  if (blob.size <= cap) {
                     carried = await new Promise((resolve, reject) => {
                       const fr = new FileReader();
                       fr.onload = () => resolve(String(fr.result));
@@ -325,14 +350,15 @@
                       fr.readAsDataURL(blob);
                     });
                   } else {
-                    push('status', `[image] ${(blob.size / 1048576).toFixed(1)} MB — too large to inline, sending the link`);
+                    // A link is only useful to the caller if it can be fetched
+                    // without this page's cookie, so say which case this is.
+                    push('status', `[${kind}] over the ${(cap / 1048576).toFixed(0)} MB inline limit — sending the link, which may need a logged-in browser`);
                   }
                 } catch (err) {
-                  push('status', `[image] could not read it here (${err?.message ?? err}), sending the link`);
+                  push('status', `[${kind}] could not read it here (${err?.message ?? err}), sending the link`);
                 }
               }
-              push('image', carried || new URL(url, location.origin).href);
-              if (mediaType) push('status', `[image] ${mediaType}`);
+              push(kind, carried || new URL(url, location.origin).href);
               break;
             }
             case 'source-url':

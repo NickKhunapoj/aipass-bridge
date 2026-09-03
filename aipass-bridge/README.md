@@ -513,6 +513,38 @@ The aspect ratio rides on the same `imageAspectRatio` field the web UI sends.
 A request can set `aspect_ratio`, `POST /config {"aspectRatio":"4:3"}` sets the
 default, and `AIPASS_ASPECT_RATIO` sets it at startup.
 
+### Video and music
+
+The same command, with a video or music model:
+
+```bash
+npm run chat -- "a cat walking through Bangkok at night" --model veo-3.1-fast-generate-001
+npm run chat -- "lo-fi study beat, rain" --model lyria-3-clip-preview
+```
+
+Generated media all arrives on the same `file` frame, and the media type
+decides what happens to it. An image becomes `![image](…)`; a video or a music
+clip becomes a **link** — `[video.mp4](…)` — because an mp4 inside an image tag
+is a broken image in every renderer there is. `npm run chat` saves either kind
+to `--out`, decoding a data URI or downloading a link once the answer has
+finished printing.
+
+Two things are different about video and music, and both are worth knowing
+before you spend a generation on them:
+
+- **Video has its own quota**, separate from the credit pool: ten a month on a
+  standard account. `npm run credits` reports it.
+- **Rendering goes quiet for minutes.** The bridge's timeout is on silence
+  rather than on total time, but three minutes of silence is normal here, so
+  video and music models get a much longer allowance —
+  `AIPASS_MEDIA_TIMEOUT_MS`, 15 minutes by default. A chat model keeps the
+  usual `AIPASS_IDLE_TIMEOUT_MS`.
+
+A clip too large to carry back inline (over 50 MB for video, 25 MB for audio)
+comes back as a link instead of the bytes. Those links are usually same-origin
+and need the session cookie, so they open in the logged-in browser but cannot
+be downloaded by the CLI — which says so rather than failing silently.
+
 ### A worked example
 
 This came out of one command. The prompt is a heading and a ten-row CSV of a
@@ -695,6 +727,7 @@ filter is being modelled, pass `reject` to refuse payloads matching a pattern.
   a tab is there, and an offscreen document when one is not — so the bridge keeps
   reporting the extension accurately instead of flapping between attached and
   gone whenever the last tab closes.
-- Every message appears in the account's chat history — this uses the real product.
+- `npm run chat` appears in the account's chat history — this uses the real
+  product. `npm run agent` does not: it uses a temporary conversation.
 - Long sessions burn credits. Only `gemini-3.1-flash-lite` is free-credit;
   `npm run models` marks it, and `npm run credits` says what is left.

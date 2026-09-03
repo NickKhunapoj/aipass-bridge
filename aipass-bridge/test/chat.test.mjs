@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
 import { startBridge, FakeExtension, scripted, tempDir, run, CHAT } from './harness.mjs';
 
 let bridge;
@@ -133,4 +134,54 @@ test('--thinking rides along with the request', async (t) => {
 
   await chat(['think hard', '--model', 'claude-opus-5@azure', '--thinking', 'max']);
   assert.equal(ext.chats.at(-1).thinkingLevel, 'max');
+});
+
+test('a generated video is decoded to disk, not left as a data URI', async (t) => {
+  const mp4 = Buffer.from('AAAAIGZ0eXBpc29t', 'base64');
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.media('video', `data:video/mp4;base64,${mp4.toString('base64')}`); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const dir = tempDir({});
+  const { out } = await chat(['a cat', '--model', 'veo-3.1-fast-generate-001', '--out', dir]);
+  assert.match(out, /video saved to/);
+  const written = fs.readdirSync(dir).filter((f) => f.endsWith('.mp4'));
+  assert.equal(written.length, 1, 'the extension must come from the media type');
+  assert.deepEqual(fs.readFileSync(path.join(dir, written[0])), mp4);
+});
+
+test('a video delivered as a link is downloaded once the answer is printed', async (t) => {
+  const body = Buffer.from('fake mp4 bytes');
+  const origin = await new Promise((resolve) => {
+    const srv = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'video/mp4' });
+      res.end(body);
+    });
+    srv.listen(0, '127.0.0.1', () => resolve({ url: `http://127.0.0.1:${srv.address().port}/clip.mp4`, srv }));
+  });
+  t.after(() => origin.srv.close());
+
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.media('video', origin.url); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const dir = tempDir({});
+  const { out } = await chat(['a cat', '--model', 'veo-3.1-fast-generate-001', '--out', dir]);
+  assert.match(out, /downloading/);
+  assert.match(out, /video saved to/);
+  const written = fs.readdirSync(dir).filter((f) => f.endsWith('.mp4'));
+  assert.deepEqual(fs.readFileSync(path.join(dir, written[0])), body);
+});
+
+test('a link that needs a browser session says so instead of failing silently', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.media('video', 'http://127.0.0.1:1/private.mp4'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await chat(['a cat', '--model', 'veo-3.1-fast-generate-001', '--out', tempDir({})]);
+  assert.match(out, /could not be downloaded/);
+  assert.match(out, /logged-in browser/);
 });

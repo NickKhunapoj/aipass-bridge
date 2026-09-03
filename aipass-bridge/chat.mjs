@@ -115,19 +115,64 @@ if (CONVERSATION) {
 // An image model answers with a data URI, which is megabytes of base64 — write
 // it out and print where it went, rather than filling the scrollback with it.
 let saved = 0;
-function keepImages(chunk) {
-  return chunk.replace(/!\[image\]\((data:([^;,)]+)[^)]*)\)/g, (whole, uri, mime) => {
+// Extensions for the media types the generators actually return, so a saved
+// file opens by double-clicking it instead of needing to be renamed.
+const EXT = {
+  jpeg: 'jpg', 'svg+xml': 'svg', mpeg: 'mp3', 'x-wav': 'wav', wave: 'wav',
+  quicktime: 'mov', 'x-matroska': 'mkv',
+};
+const extFor = (mime) => {
+  const sub = (mime.split('/')[1] || 'bin').toLowerCase();
+  return EXT[sub] ?? sub.replace(/[^a-z0-9]/g, '');
+};
+
+const writeMedia = (buf, mime, label) => {
+  const file = path.join(OUT_DIR, `aipass-${Date.now()}-${++saved}.${extFor(mime)}`);
+  fs.writeFileSync(file, buf);
+  return `\n${cyan(`[${label} saved to ${file}]`)}\n`;
+};
+
+// Generated media arrives as markdown: an image tag for pictures, a link for a
+// video or a music clip. Either way the payload is a data: URI to decode, or a
+// URL to go and fetch — a link nobody downloads is not much of a result.
+function keepMedia(chunk) {
+  return chunk.replace(/(!?)\[([^\]]*)\]\((data:([^;,)]+)[^)]*|https?:\/\/[^)\s]+)\)/g, (whole, bang, label, target, mime) => {
+    const kind = bang ? 'image' : (label.split('.')[0] || 'file');
     try {
-      const comma = uri.indexOf(',');
-      if (comma === -1) return whole;
-      const ext = (mime.split('/')[1] || 'png').replace(/^jpeg$/, 'jpg');
-      const file = path.join(OUT_DIR, `aipass-${Date.now()}-${++saved}.${ext}`);
-      fs.writeFileSync(file, Buffer.from(uri.slice(comma + 1), 'base64'));
-      return `\n${cyan(`[image saved to ${file}]`)}\n`;
+      if (target.startsWith('data:')) {
+        const comma = target.indexOf(',');
+        if (comma === -1) return whole;
+        return writeMedia(Buffer.from(target.slice(comma + 1), 'base64'), mime, kind);
+      }
+      // A remote link is only worth chasing when it is the media itself; a
+      // citation in the prose is not, and those are plain text, not a link.
+      if (!bang && !['video', 'audio', 'image', 'file'].includes(kind)) return whole;
+      pending.push({ url: target, kind });
+      return `\n${cyan(`[${kind} at ${target} — downloading]`)}\n`;
     } catch (err) {
-      return `\n[image could not be saved: ${err.message}]\n`;
+      return `\n[${kind} could not be saved: ${err.message}]\n`;
     }
   });
+}
+
+// Remote media is fetched after the stream closes, so a slow download does not
+// stall the answer still being printed.
+const pending = [];
+async function drainPending() {
+  for (const { url, kind } of pending.splice(0)) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const mime = (res.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim();
+      const buf = Buffer.from(await res.arrayBuffer());
+      stdout.write(writeMedia(buf, mime, kind));
+    } catch (err) {
+      // The generators hand back same-origin URLs that need the session cookie,
+      // which this process does not have. Say so rather than failing silently.
+      stdout.write(`\n[${kind} could not be downloaded from ${url}: ${err.message}]\n` +
+        `[it may need a logged-in browser — open the link there]\n`);
+    }
+  }
 }
 
 if (attachments.length) {
@@ -176,10 +221,11 @@ async function ask(text) {
       const delta = evt.choices?.[0]?.delta ?? {};
       // Tool progress and sources, kept visually distinct from the answer.
       if (delta.reasoning_content) stdout.write(cyan(delta.reasoning_content));
-      if (delta.content) { stdout.write(keepImages(delta.content)); wrote = true; }
+      if (delta.content) { stdout.write(keepMedia(delta.content)); wrote = true; }
     }
   }
   stdout.write(wrote ? '\n' : dim('\n(no reply)\n'));
+  await drainPending();
 }
 
 if (question) {
