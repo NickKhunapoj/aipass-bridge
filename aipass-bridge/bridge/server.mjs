@@ -9,6 +9,7 @@
 // for the web UI, so there is nothing to reconstruct on this side.
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { createLogger } from './logger.mjs';
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
 const HOST = process.env.AIPASS_HOST ?? '127.0.0.1';
@@ -57,7 +58,7 @@ const corsHeaders = () => (CORS_ORIGIN
   ? { 'access-control-allow-origin': CORS_ORIGIN, 'access-control-allow-private-network': 'true' }
   : {});
 
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+const logger = createLogger();
 
 /* ------------------------------------------------- react-router turbo-stream */
 
@@ -201,6 +202,7 @@ class Job {
     const client = pickClient();
     if (!client) return this.fail('no extension connected — open a de.aipass.net tab and check the popup');
     this.client = client;
+    logger.debug('job', `dispatch · kind=${this.kind}${this.modelId ? ` model=${this.modelId}` : ''}${this.conversationId ? ` conversation=${this.conversationId}` : ''}`);
     sendToClient(client, 'job', this.kind === 'loader'
       ? { jobId: this.id, kind: 'loader', url: this.url }
       : this.kind === 'create'
@@ -208,8 +210,8 @@ class Job {
       : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel });
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
-  done(value) { if (this.settled) return; this.cleanup(); this.onDone(value ?? 'stop'); }
-  fail(message) { if (this.settled) return; this.cleanup(); this.onError(message); }
+  done(value) { if (this.settled) return; logger.debug('job', `done · kind=${this.kind} result=${value ?? 'stop'}`); this.cleanup(); this.onDone(value ?? 'stop'); }
+  fail(message) { if (this.settled) return; logger.warn('job', `failed · kind=${this.kind} ${message}`); this.cleanup(); this.onError(message); }
   abort() {
     if (this.settled) return;
     if (this.client) sendToClient(this.client, 'abort', { jobId: this.id });
@@ -257,10 +259,10 @@ async function listModels({ force = false } = {}) {
         const free = models.filter((m) => m.free).map((m) => m.id);
         const byKind = [...new Set(models.map((m) => m.kind))]
           .map((k) => `${models.filter((m) => m.kind === k).length} ${k}`).join(', ');
-        log(`${models.length} models (${byKind})${free.length ? ` · free credit: ${free.join(', ')}` : ''}`);
+        logger.info('models', `${models.length} models (${byKind})${free.length ? ` · free credit: ${free.join(', ')}` : ''}`);
       }
     } catch (err) {
-      log('model refresh failed:', err.message);
+      logger.warn('models', `refresh failed · ${err.message}`);
     } finally {
       modelRefresh = null;
     }
@@ -305,10 +307,10 @@ async function getQuota({ force = false } = {}) {
       const value = extractQuota(JSON.parse(await fetchLoader(LOADERS.quota)));
       if (value) {
         quotaCache = { at: Date.now(), value };
-        log(`credits ${value.available.toFixed(0)} of ${value.limit.toFixed(0)} left`);
+        logger.info('credits', `${value.available.toFixed(0)} of ${value.limit.toFixed(0)} left`);
       }
     } catch (err) {
-      log('credit refresh failed:', err.message);
+      logger.warn('credits', `refresh failed · ${err.message}`);
     } finally {
       quotaRefresh = null;
     }
@@ -381,7 +383,7 @@ async function createConversation({ modelId = defaultModel, message = 'Hello', a
   conversationIsTemporary = Boolean(temporary);
   conversationIndex = 0;
   conversationList = [];
-  log(`created ${temporary ? 'temporary ' : ''}conversation ${id}`);
+  logger.info('conversation', `created · ${temporary ? 'temporary ' : ''}${id}`);
   return id;
 }
 
@@ -395,7 +397,7 @@ async function resolveConversation() {
   }
   conversationCache = pick.id;
   conversationIsTemporary = pick.isTemporary === true;
-  log(`conversation ${conversationCache} (${pick.title ?? 'untitled'})`);
+  logger.info('conversation', `selected · ${conversationCache} (${pick.title ?? 'untitled'})`);
   return conversationCache;
 }
 
@@ -422,7 +424,7 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, on
       onError: (message) => {
         const rejected = /conversation not found|returned 404|returned 409/i.test(message);
         if (rejected && attempts <= 3 && delivered === 0 && !PINNED_CONVERSATION) {
-          log(`conversation ${conversationId} rejected, trying the next one`);
+          logger.warn('conversation', `rejected · ${conversationId}; trying the next one`);
           conversationIndex++;
           conversationCache = null;
           attempt();
@@ -565,7 +567,7 @@ async function extractUserParts(messages) {
             try {
               dataUri = await fetchRemoteAsDataUri(urlStr, 'image');
             } catch (err) {
-              log(`warning: failed to fetch remote image ${urlStr}: ${err.message}`);
+              logger.warn('attachment', `remote image fetch failed · ${urlStr}: ${err.message}`);
             }
           }
           if (dataUri) {
@@ -587,12 +589,12 @@ async function extractUserParts(messages) {
           if (str.startsWith('data:')) {
             const declared = dataUriType(str);
             if (isAllowedAttachment(declared, 'file')) dataUri = str;
-            else log(`warning: refusing attachment of type ${declared || 'unknown'}`);
+            else logger.warn('attachment', `refused type · ${declared || 'unknown'}`);
           } else if (/^https?:\/\//i.test(str)) {
             try {
               dataUri = await fetchRemoteAsDataUri(str, 'file');
             } catch (err) {
-              log(`warning: failed to fetch remote file ${str}: ${err.message}`);
+              logger.warn('attachment', `remote file fetch failed · ${str}: ${err.message}`);
             }
           }
           if (dataUri) {
@@ -671,14 +673,14 @@ async function chatCompletions(req, res) {
   // decide. A level the model does not list is dropped rather than sent.
   const thinking = String(payload.thinking_level ?? payload.thinkingLevel ?? '').trim().toLowerCase();
   const thinkingLevel = thinking ? thinkingLevelFor(model, thinking) : undefined;
-  if (thinking && !thinkingLevel) log(`warning: ${model} does not offer thinking level ${thinking}`);
+  if (thinking && !thinkingLevel) logger.warn('chat', `${model} does not offer thinking level ${thinking}`);
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
 
   const id = `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
   const created = Math.floor(Date.now() / 1000);
   const imageCount = (parts ?? []).filter(p => p.type === 'image').length;
-  log(`chat -> ${model} (${Buffer.byteLength(text)} bytes text${imageCount ? `, ${imageCount} image(s)` : ''})`);
+  logger.info('chat', `request · model=${model} input=${Buffer.byteLength(text)}B${imageCount ? ` images=${imageCount}` : ''} stream=${Boolean(payload.stream)}`);
 
   if (payload.stream) {
     res.writeHead(200, {
@@ -772,7 +774,7 @@ function extEvents(req, res) {
   });
   const client = { id: randomUUID(), res };
   extClients.add(client);
-  log(`extension connected (${extClients.size} total)`);
+  logger.info('extension', `connected · total=${extClients.size}`);
   sendToClient(client, 'ready', { clientId: client.id });
   // Warm the caches a moment after the tab attaches — but only if this client
   // is still the reason to: a tab that closed in the meantime would otherwise
@@ -785,7 +787,7 @@ function extEvents(req, res) {
   req.on('close', () => {
     clearInterval(ping);
     extClients.delete(client);
-    log(`extension disconnected (${extClients.size} left)`);
+    logger.info('extension', `disconnected · remaining=${extClients.size}`);
     // Do NOT fail in-flight jobs. The upstream fetch lives in the page and
     // survives the worker being evicted, which is exactly what happens during
     // a long web_search when no deltas flow to reset the worker's idle timer.
@@ -876,12 +878,12 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse(await readBody(req) || '{}');
       if (typeof body.defaultModel === 'string' && body.defaultModel.trim()) {
         defaultModel = body.defaultModel.trim();
-        log(`default model ${defaultModel}`);
+        logger.info('config', `default model · ${defaultModel}`);
       }
-      if (typeof body.assistant === 'string') { assistantId = body.assistant.trim(); log(assistantId ? `assistant ${assistantId}` : 'assistant cleared'); }
+      if (typeof body.assistant === 'string') { assistantId = body.assistant.trim(); logger.info('config', assistantId ? `assistant · ${assistantId}` : 'assistant cleared'); }
       if (typeof body.aspectRatio === 'string' && body.aspectRatio.trim()) {
         aspectRatio = body.aspectRatio.trim();
-        log(`aspect ratio ${aspectRatio}`);
+        logger.info('config', `aspect ratio · ${aspectRatio}`);
       }
       if (body.conversation === null || typeof body.conversation === 'string') {
         // Pinning an id says nothing about how it was created, so it is treated
@@ -890,7 +892,7 @@ const server = http.createServer(async (req, res) => {
         conversationIsTemporary = body.temporary === true;
         conversationIndex = 0;
         if (!conversationCache) conversationList = [];
-        log(conversationCache ? `conversation ${conversationCache}` : 'conversation cleared');
+        logger.info('config', conversationCache ? `conversation · ${conversationCache}` : 'conversation cleared');
       }
       return json(res, 200, { ok: true, defaultModel, assistant: assistantId || null, aspectRatio, conversation: PINNED_CONVERSATION || conversationCache, temporary: conversationIsTemporary });
     }
@@ -962,15 +964,15 @@ const server = http.createServer(async (req, res) => {
 
     return oaiError(res, 404, `no route for ${req.method} ${path}`, 'not_found');
   } catch (err) {
-    log('unhandled', err);
+    logger.error('http', 'unhandled request error', err);
     if (!res.headersSent) oaiError(res, 500, String(err?.message ?? err), 'server_error');
     else res.end();
   }
 });
 
 server.listen(PORT, HOST, () => {
-  log(`aipass bridge on http://${HOST}:${PORT}`);
-  log(`  default model : ${defaultModel}`);
-  log(`  conversation  : ${PINNED_CONVERSATION || 'most recent on the account'}`);
-  log('  waiting for the Chrome extension…');
+  logger.info('bridge', `listening · http://${HOST}:${PORT}`);
+  logger.info('bridge', `default model · ${defaultModel}`);
+  logger.info('bridge', `conversation · ${PINNED_CONVERSATION || 'most recent on the account'}`);
+  logger.info('bridge', 'waiting for the Chrome extension…');
 });

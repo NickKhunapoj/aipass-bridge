@@ -141,6 +141,14 @@ Tool activity is sent as `reasoning_content`, so an OpenAI client that only
 reads `content` sees a clean answer. `AIPASS_TOOL_VISIBILITY=text` inlines it,
 `off` drops it.
 
+## Logging
+
+Bridge operational logs use a shared timestamp, severity, component, and
+message format. `INFO` is the default minimum severity; set
+`AIPASS_LOG_LEVEL=debug` to include dispatch-level `DEBUG` records. In an
+interactive terminal, levels and components are colour-coded. Set
+`AIPASS_LOG_COLOR=always` or `never` to override automatic colour detection.
+
 ## From code
 
 The endpoint is OpenAI-compatible, so any SDK works — point it at
