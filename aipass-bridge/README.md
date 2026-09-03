@@ -732,6 +732,14 @@ and are reported for the same reason, though nothing sends them yet.
 `4` and `6` seconds and the picker is a dropdown, so a value outside it is
 likely to be rejected upstream once the job has already been accepted.
 
+**A rejected job costs no quota.** Both an invalid body (`400`) and the
+provider's safety filter (`provider_content_policy`) fail before the generation
+is counted — verified against `npm run credits` across both. That filter is
+strict about recognisable faces, public figures, copyrighted characters,
+violence and sensitive subjects, and a plain crowd scene can be enough to trip
+it, so prompts can be iterated freely. The bridge expands the terse codes into
+what they mean, since the web UI's explanation never reaches a terminal.
+
 ```bash
 npm run chat -- --model seedance-2.0-mini --resolution 480p --duration 6 \
   --camera-fixed --no-audio "a calm street in Bangkok at night"
