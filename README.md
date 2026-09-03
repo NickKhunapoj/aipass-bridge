@@ -94,6 +94,15 @@ your bridge on localhost.
 Built on Node with no runtime dependencies, plus an MV3 Chrome extension.
 `npm run dev:next` still starts the Next.js app that this repo was scaffolded from.
 
+## Security
+
+The bridge has no authentication of its own — keep it on `127.0.0.1`. Anything
+that can reach the port can spend the account's credits.
+
+**If you cloned or forked before 2 Sep 2026, update.** Copies taken before
+[`8cad676`](https://github.com/niawjunior/aipass-bridge/commit/8cad676) have a
+bridge that any website you visited could drive. See [SECURITY.md](SECURITY.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: check
