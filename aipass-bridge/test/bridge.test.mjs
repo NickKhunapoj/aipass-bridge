@@ -530,3 +530,61 @@ test('a thinking level is checked against what the model advertises', async (t) 
   await post({ model: 'claude-sonnet-5@default', messages: [{ role: 'user', content: 'hi' }], thinking_level: 'high' });
   assert.equal(ext.chats.at(-1).thinkingLevel, 'high');
 });
+
+test('a generated video comes back as a link, not a broken image tag', async (t) => {
+  const mp4 = 'data:video/mp4;base64,AAAAIGZ0eXA=';
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.media('video', mp4); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const body = await (await post({ model: 'veo-3.1-fast-generate-001', messages: [{ role: 'user', content: 'a cat' }] })).json();
+  const content = body.choices[0].message.content;
+  assert.match(content, /\[video\.mp4\]\(data:video\/mp4;base64,/);
+  assert.ok(!content.includes('!['), 'an mp4 in an image tag renders as a broken image');
+});
+
+test('a generated music clip comes back as an audio link', async (t) => {
+  const wav = 'data:audio/wav;base64,UklGRg==';
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.media('audio', wav); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const body = await (await post({ model: 'lyria-3-pro-preview', messages: [{ role: 'user', content: 'lo-fi' }] })).json();
+  assert.match(body.choices[0].message.content, /\[audio\.wav\]\(data:audio\/wav;base64,/);
+});
+
+test('media too large to inline comes back as a link that still resolves', async (t) => {
+  const url = 'https://de.aipass.net/api/media/abc123.mp4';
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.media('video', url); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const body = await (await post({ model: 'veo-3.1-fast-generate-001', messages: [{ role: 'user', content: 'a cat' }] })).json();
+  assert.match(body.choices[0].message.content, /\[video\]\(https:\/\/de\.aipass\.net\/api\/media\/abc123\.mp4\)/);
+});
+
+test('a video model gets a longer silence allowance than a chat model', async (t) => {
+  const slow = await startBridge({ AIPASS_IDLE_TIMEOUT_MS: '400', AIPASS_MEDIA_TIMEOUT_MS: '8000' });
+  t.after(() => slow.stop());
+  // never answers: whether the job survives is entirely down to the timeout
+  const ext = await new FakeExtension(slow.base, { onChat: async () => {} }).connect();
+  t.after(() => ext.disconnect());
+
+  const chat = await (await fetch(`${slow.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-3.1-flash-lite', messages: [{ role: 'user', content: 'hi' }] }),
+  })).json();
+  assert.match(chat.error.message, /timed out/, 'a chat model still times out quickly');
+
+  const started = Date.now();
+  const video = fetch(`${slow.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'veo-3.1-fast-generate-001', messages: [{ role: 'user', content: 'a cat' }] }),
+  });
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.ok(Date.now() - started > 1000, 'the video job must outlive the chat timeout');
+  video.catch(() => {});
+});

@@ -20,6 +20,11 @@ const MODELS_FALLBACK = (process.env.AIPASS_MODELS ?? 'gemini-3.1-flash-lite,cla
 const TOOL_VISIBILITY = process.env.AIPASS_TOOL_VISIBILITY ?? 'reasoning';
 const PINNED_CONVERSATION = process.env.AIPASS_CONVERSATION_ID ?? '';
 const IDLE_TIMEOUT_MS = Number(process.env.AIPASS_IDLE_TIMEOUT_MS ?? 180_000);
+// Rendering a video or a music clip can go quiet for minutes at a stretch. The
+// timeout is on silence, not on total time, but three minutes of it is normal
+// here and would kill a generation that was going to succeed — and the credits
+// are already spent by then.
+const MEDIA_TIMEOUT_MS = Number(process.env.AIPASS_MEDIA_TIMEOUT_MS ?? 900_000);
 const MAX_BODY = 8 * 1024 * 1024;
 
 let defaultModel = process.env.AIPASS_MODEL ?? 'gemini-3.1-flash-lite';
@@ -419,6 +424,7 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, on
     current = new Job({
       modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel,
       temporary: conversationIsTemporary,
+      timeoutMs: ['video', 'music'].includes(kindOf(modelId)) ? MEDIA_TIMEOUT_MS : IDLE_TIMEOUT_MS,
       onDelta: (part) => { delivered++; onDelta(part); },
       onDone,
       onError: (message) => {
@@ -659,6 +665,18 @@ const oaiError = (res, status, message, type = 'invalid_request_error') =>
 
 /* ---------------------------------------------------------- chat completions */
 
+// Chat completions have no field for generated media, so it goes into the
+// content as markdown — which every client already renders. An image gets an
+// image tag; a video or a music clip gets a link, because an mp4 in an image
+// tag is a broken image in every renderer there is.
+const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'file']);
+function mediaMarkdown(kind, target) {
+  if (kind === 'image') return `\n![image](${target})\n`;
+  const name = { video: 'video', audio: 'audio', file: 'file' }[kind] ?? 'file';
+  const ext = (target.match(/^data:([^;,]+)/)?.[1]?.split('/')[1] || '').replace(/[^a-z0-9]/gi, '');
+  return `\n[${ext ? `${name}.${ext}` : name}](${target})\n`;
+}
+
 async function chatCompletions(req, res) {
   let payload;
   try { payload = JSON.parse(await readBody(req)); }
@@ -707,9 +725,7 @@ async function chatCompletions(req, res) {
           else emit({ reasoning_content: `${part.text}\n` });
           return;
         }
-        // Chat completions have no field for a generated image, so it goes into
-        // the content as markdown — which every client already renders.
-        if (part.kind === 'image') return void emit({ content: `\n![image](${part.text})\n` });
+        if (MEDIA_KINDS.has(part.kind)) return void emit({ content: mediaMarkdown(part.kind, part.text) });
         if (part.kind === 'reasoning') emit({ reasoning_content: part.text });
         else emit({ content: part.text });
       },
@@ -735,7 +751,7 @@ async function chatCompletions(req, res) {
       modelId: model, text, parts, aspectRatio: ratio, thinkingLevel,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
-        if (p.kind === 'image') { out += `\n![image](${p.text})\n`; return; }
+        if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text); return; }
         if (p.kind === 'reasoning') reasoning += p.text;
         else out += p.text;
       },
