@@ -143,6 +143,9 @@ const DEFAULT_MODELS = [
   // levels have to come from the model rather than a hardcoded list.
   { id: 'claude-opus-5@azure', displayName: 'Claude Opus 5', provider: 'anthropic', providerName: 'Anthropic', ready: true, thinkingConfig: { supportedLevels: ['low', 'medium', 'high', 'max'] } },
   { id: 'veo-3.1-fast-generate-001', displayName: 'Veo 3.1 Fast', provider: 'google', providerName: 'Google', ready: true },
+  // The only video model that offers a resolution, which is what makes the
+  // per-model option gate observable.
+  { id: 'seedance-2.0-mini', displayName: 'Seedance 2.0 Mini', provider: 'byteplus', providerName: 'BytePlus', ready: true },
   { id: 'gpt-image-2', displayName: 'GPT-Image-2', provider: 'openai', providerName: 'OpenAI', ready: true },
   { id: 'gemini-3-pro-image', displayName: 'Nano Banana Pro', provider: 'google', providerName: 'Google', ready: true },
   { id: 'lyria-3-pro-preview', displayName: 'Lyria 3 Pro', provider: 'google', providerName: 'Google', ready: true },
@@ -166,6 +169,7 @@ export class FakeExtension {
     this.conversations = conversations;
     this.chats = [];       // every chat job received
     this.created = [];     // every create-conversation job received
+    this.videos = [];      // every video-generation job received
     this.loaders = [];     // every loader url received
   }
 
@@ -240,6 +244,7 @@ export class FakeExtension {
         : modelsFixture(this.models);
       return void this.post('/ext/loader', { jobId: job.jobId, raw });
     }
+    if (job.kind === 'video') this.videos.push(job);
     this.chats.push(job);
     const emit = {
       text: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'text', text: t }] }),

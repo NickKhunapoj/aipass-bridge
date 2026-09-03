@@ -538,10 +538,12 @@ What a generation actually returns, from a real `lyria-3-clip-preview` run:
 Three things follow from that, and all three are worth knowing before you spend
 a generation:
 
-- **It streams; there is no job to poll.** The request stays open for the whole
-  render — about 65 seconds for a 30-second clip, and longer for video. The
-  bridge's timeout is on silence rather than total time, but a quiet minute is
-  normal here, so video and music models get a much longer allowance:
+- **Music streams; video does not.** A music request stays open for the whole
+  render — about 65 seconds for a 30-second clip. Video is a job that gets
+  polled instead, on a different route entirely (see
+  [Video is a different protocol](#video-is-a-different-protocol)). Either way
+  the bridge's timeout is on silence rather than total time, and a quiet minute
+  is normal, so video and music models get a much longer allowance:
   `AIPASS_MEDIA_TIMEOUT_MS`, 15 minutes by default. Chat keeps the usual
   `AIPASS_IDLE_TIMEOUT_MS`.
 - **The link is signed, public, and short-lived.** It is a
@@ -619,9 +621,10 @@ npm run chat -- --new --model seedance-2.0-mini "a calm street in Bangkok at nig
 
 https://github.com/user-attachments/assets/598fe8ec-868c-4c7d-a9e1-a3ae0b7e077e
 
-4 seconds at 480p,
-16:9, 1.6 MB. About 100 seconds to render, and the web UI reports a **percentage
-while it works**, so the stream is not silent.
+[The clip](docs/01a065f9-b680-70ee-9b8b-9af350dd4fd7.mp4) — 4 seconds at 480p,
+16:9, 1.6 MB. About 100 seconds to render, across roughly nineteen polls. The
+job reports a **percentage** as it goes, which the bridge passes through as
+status lines.
 
 The two parts do not have the same shape, which is worth knowing if you touch
 this code:
@@ -635,24 +638,82 @@ this code:
  "storageKey":"video-generations/…","snapshotUrl":"https://storage.googleapis.com/…"}
 ```
 
-Reading only `url` dropped every generated video silently. The extension reads
-`url ?? snapshotUrl` and passes the `filename` through when there is one, which
-is why the music link is labelled `audio.mp3` and the video keeps its own name.
+These are the shapes stored on the message. Reading only `url` dropped a video
+silently, so the extension reads `url ?? snapshotUrl` and passes the `filename`
+through when there is one — which is why a music link is labelled `audio.mp3`
+while a video keeps its own name. A live generation no longer arrives this way
+(the job hands back a `videoUrl` directly), but a `file` frame carrying a video
+still can, and used to be discarded.
 
-### Video options that are not wired yet
+### Video is a different protocol
 
-Selecting **สร้างวิดีโอ** in the web UI reveals settings the bridge does not
-send: อัตราส่วน (16:9, 9:16, 1:1, 4:3, 3:4, and 21:9 on seedance), ความละเอียด
-(480p), ความยาว (4s), ล็อกกล้อง (camera lock) and สร้างเสียงประกอบ (generate
-audio, on by default). Defaults are used for all of them.
+Chat, images and music all stream back from `/actions/send-message`. **Video
+does not go through that route at all.** It is submitted as a job and polled:
 
-The **สไตล์ (style)** presets come from `/loaders/list-video-styles` and are
-real records — `{id, name_en, name_th, preprompt, icon, sort_order}` — for
-Cute / Mascot, Documentary, AI / Cyber, Minimal, Realistic and the rest. Each
-carries a `preprompt` that is prepended to the prompt. What is still unknown is
-which field on `send-message` carries the choice: the app captures `window.fetch`
-before anything else can hook it, so the request body has resisted two capture
-attempts. A single capture with a style selected would wire all of them.
+```
+POST /actions/video-generation      → {jobId, status, provider, messageId, …}
+GET  /actions/video-generation?conversationId=…&jobId=…
+                                    → {jobId, status, progress, videoUrl, modelId}
+POST /actions/video-generation      {_action:"cancel", conversationId, jobId}
+```
+
+The bridge does the same: a model whose kind is `video` becomes a `video` job in
+the extension, which submits it, polls every two seconds, reports progress as it
+moves, and hands back the `videoUrl` when the status turns `completed`. If the
+request is abandoned the job is cancelled rather than left running, because an
+orphaned job still spends the account's video quota.
+
+The submit body, and what the bridge maps onto it:
+
+| aipass field | request field | notes |
+| --- | --- | --- |
+| `prompt` | the user message | |
+| `provider` | — | taken from the model's own `provider` |
+| `modelId` | `model` | |
+| `aspectRatio` | `aspect_ratio` | 16:9, 9:16, 1:1, 4:3, 3:4, and 21:9 on seedance |
+| `stylePreprompt` | `style_preprompt` | the preset's **preprompt text**, not its id |
+| `resolution` | `resolution` | only on the models that declare one — see below |
+| `duration` | `duration` | seconds |
+| `cameraFixed` | `camera_fixed` | |
+| `generateAudio` | `generate_audio` | |
+
+Every one of these is omitted unless set, exactly as the web client omits them.
+
+### The option surface differs per model
+
+`GET /v1/models` reports what each video model accepts, so a client does not
+have to guess:
+
+```json
+{ "id": "seedance-2.0-mini", "kind": "video",
+  "options": { "aspectRatio": true, "stylePreprompt": true, "duration": true,
+               "cameraFixed": true, "generateAudio": true,
+               "resolutions": ["480p", "720p"],
+               "images": { "maximumImages": 9, "sourceImage": false, "referenceImages": true } } }
+```
+
+Only `seedance-2.0-fast` and `seedance-2.0-mini` declare resolutions
+(`480p`, `720p`); every other video model has none and the web UI shows no
+control for one, which is why the bridge drops a resolution those models never
+receive. The image limits differ too — veo takes a source image and up to three
+references, seedance takes up to nine reference images and no source image —
+and are reported for the same reason, though nothing sends them yet.
+
+```bash
+npm run chat -- --model seedance-2.0-mini --resolution 720p --duration 8 \
+  --camera-fixed --no-audio "a calm street in Bangkok at night"
+```
+
+The **style** presets live in `/loaders/list-video-styles` as records of
+`{id, name_en, name_th, preprompt, icon, sort_order}` — Cute / Mascot,
+Documentary, AI / Cyber, Minimal, Realistic and the rest. The app does not send
+the id; it sends that record's `preprompt` string, so `--style` takes the text.
+
+The model categories (`kind`) are the app's own lists, lifted from its bundle
+rather than guessed from name shapes, and cover ids this account cannot yet see
+— `sora-2`, `wan2.2@jts`, `FLUX.2-pro`, the `gemini-3.1-*-image` family — so a
+model that appears later is already classified. A name-shaped fallback still
+catches anything genuinely new.
 
 ## When it is not working
 

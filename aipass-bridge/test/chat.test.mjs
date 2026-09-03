@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import { startBridge, FakeExtension, scripted, tempDir, run, CHAT } from './harness.mjs';
+import { startBridge, FakeExtension, scripted, tempDir, run, waitFor, CHAT } from './harness.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -208,4 +208,19 @@ test('a video link labelled with a filename is still downloaded', async (t) => {
   assert.ok(!out.includes('X-Goog-Signature'), 'the signature is noise in the terminal');
   const written = fs.readdirSync(dir).filter((f) => f.endsWith('.mp4'));
   assert.deepEqual(fs.readFileSync(path.join(dir, written[0])), body);
+});
+
+test('--resolution and the video switches reach the job', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
+
+  await chat(['a street', '--model', 'seedance-2.0-mini', '--resolution', '720p',
+    '--duration', '8', '--camera-fixed', '--no-audio', '--style', 'Documentary style.']);
+  const job = ext.videos.at(-1);
+  assert.equal(job.resolution, '720p');
+  assert.equal(job.duration, 8);
+  assert.equal(job.cameraFixed, true);
+  assert.equal(job.generateAudio, false);
+  assert.equal(job.stylePreprompt, 'Documentary style.');
 });

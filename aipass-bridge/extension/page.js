@@ -9,6 +9,9 @@
   window.__aipassBridgeGen = GEN;
 
   const TAG = '__aipass_bridge';
+  // How often a submitted video job is polled. The web client sits in the same
+  // range; a 4-second clip takes roughly a hundred seconds to render.
+  const POLL_MS = 2000;
   const inflight = new Map();
   // How many bytes of media may be carried back inline as a data URI; above
   // this it goes back as a link, since the bridge caps a POST body at 8 MB and
@@ -406,13 +409,108 @@
     }
   }
 
+  // Video is a different protocol from everything else here. Chat, images and
+  // music stream back from /actions/send-message; video is submitted as a job
+  // to /actions/video-generation, then polled until it reports completed. The
+  // web client does exactly this, and there is no streaming variant of it.
+  async function runVideo(job) {
+    const controller = new AbortController();
+    inflight.set(job.jobId, controller);
+    const buffer = [];
+    const push = (kind, text, filename) => { if (text) buffer.push({ kind, text, ...(filename ? { filename } : {}) }); };
+    const flush = () => { if (buffer.length) { reply({ jobId: job.jobId, kind: 'chunk', parts: buffer.splice(0) }); } };
+    let jobId = '';
+    try {
+      const body = {
+        conversationId: job.conversationId,
+        prompt: job.text,
+        provider: job.provider,
+        modelId: job.modelId,
+        // Only what the caller actually set. The app omits each of these the
+        // same way rather than sending a default of its own.
+        ...(job.aspectRatio ? { aspectRatio: job.aspectRatio } : {}),
+        ...(job.stylePreprompt ? { stylePreprompt: job.stylePreprompt } : {}),
+        ...(job.resolution ? { resolution: job.resolution } : {}),
+        ...(job.duration !== undefined ? { duration: job.duration } : {}),
+        ...(job.cameraFixed !== undefined ? { cameraFixed: job.cameraFixed } : {}),
+        ...(job.generateAudio !== undefined ? { generateAudio: job.generateAudio } : {}),
+      };
+      const res = await fetch('/actions/video-generation', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 500);
+        throw new Error(`video-generation returned ${res.status}: ${detail}`);
+      }
+      const started = await res.json();
+      if (started?.error) throw new Error(String(started.error));
+      jobId = started?.jobId;
+      if (!jobId) throw new Error('video-generation returned no jobId');
+      // The model can be switched server-side when the requested one is busy.
+      if (started.autoSwitched && started.modelId) {
+        push('status', `[video] switched to ${started.modelId}`);
+      }
+      push('status', `[video] job ${jobId} accepted`);
+      flush();
+
+      const url = `/actions/video-generation?conversationId=${encodeURIComponent(job.conversationId)}&jobId=${encodeURIComponent(jobId)}`;
+      let lastProgress = -1;
+      for (;;) {
+        await new Promise((r) => setTimeout(r, POLL_MS));
+        if (controller.signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        const poll = await fetch(url, { credentials: 'include', signal: controller.signal });
+        if (!poll.ok) throw new Error(`polling returned ${poll.status}`);
+        const state = await poll.json();
+        // Progress is not monotonic and can be absent; only say something when
+        // it actually moves, or the caller gets a status line every two seconds.
+        if (typeof state.progress === 'number' && state.progress !== lastProgress) {
+          lastProgress = state.progress;
+          push('status', `[video] ${state.progress}%`);
+          flush();
+        }
+        if (state.status === 'completed') {
+          const videoUrl = state.videoUrl ?? state.url;
+          if (!videoUrl) throw new Error('the job completed without a video url');
+          push('video', videoUrl, `${jobId}.mp4`);
+          flush();
+          reply({ jobId: job.jobId, kind: 'done', finishReason: 'stop' });
+          return;
+        }
+        if (state.status === 'failed' || state.error) {
+          throw new Error(String(state.error ?? 'video generation failed'));
+        }
+      }
+    } catch (err) {
+      // A job left running keeps burning the account's video quota, so cancel
+      // it on the way out rather than abandoning it.
+      if (jobId) {
+        fetch('/actions/video-generation', {
+          method: 'POST', credentials: 'include',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ _action: 'cancel', conversationId: job.conversationId, jobId }),
+        }).then((r) => r.body?.cancel()).catch(() => {});
+      }
+      if (err?.name === 'AbortError') reply({ jobId: job.jobId, kind: 'done', finishReason: 'stop' });
+      else reply({ jobId: job.jobId, kind: 'error', message: String(err?.message ?? err) });
+    } finally {
+      inflight.delete(job.jobId);
+    }
+  }
+
   window.addEventListener('message', (event) => {
     if (window.__aipassBridgeGen !== GEN) return; // superseded by a newer injection
     if (event.source !== window) return;
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg[TAG] === 'req') {
-      const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'create' ? runCreate : run;
+      const fn = msg.job.kind === 'loader' ? runLoader
+        : msg.job.kind === 'create' ? runCreate
+        : msg.job.kind === 'video' ? runVideo
+        : run;
       fn(msg.job);
     }
     else if (msg[TAG] === 'abort') inflight.get(msg.jobId)?.abort();

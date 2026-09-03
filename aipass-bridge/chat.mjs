@@ -25,7 +25,13 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --file PATH         attach a document or image; repeat for several
   --thinking LEVEL    how hard a reasoning model thinks (low, medium, high —
                       and max on Claude Opus)
-  --ratio R           image aspect ratio    (1:1, 3:4, 4:3 — image models only)
+  --ratio R           aspect ratio          (images: 1:1, 3:4, 4:3;
+                      video: 16:9, 9:16, 1:1, 4:3, 3:4, and 21:9 on seedance)
+  --resolution R      video resolution      (480p, 720p — seedance only)
+  --duration N        video length in seconds
+  --camera-fixed      lock the camera for the shot
+  --no-audio          do not generate a soundtrack with the video
+  --style TEXT        a video style preprompt (see npm run models -- --styles)
   --out DIR           where to save generated images   (default: the cwd)
   --paste-idle MS     how long to wait before treating pasted lines as one
                       message                          (default: 60)
@@ -43,6 +49,11 @@ let model = flag('model', null);
 const OUT_DIR = path.resolve(flag('out', process.cwd()));
 const RATIO = flag('ratio', null);
 const THINKING = flag('thinking', null);
+const RESOLUTION = flag('resolution', null);
+const DURATION = flag('duration', null);
+const STYLE = flag('style', null);
+const CAMERA_FIXED = argv.includes('--camera-fixed');
+const NO_AUDIO = argv.includes('--no-audio');
 // Repeatable, unlike the other flags: several files can be attached at once.
 const FILES = argv.reduce((acc, a, i) => (a === '--file' && argv[i + 1] ? [...acc, argv[i + 1]] : acc), []);
 const question = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
@@ -203,6 +214,11 @@ async function ask(text) {
       model, stream: true, messages: [{ role: 'user', content }],
       ...(RATIO ? { aspect_ratio: RATIO } : {}),
       ...(THINKING ? { thinking_level: THINKING } : {}),
+      ...(RESOLUTION ? { resolution: RESOLUTION } : {}),
+      ...(DURATION ? { duration: Number(DURATION) } : {}),
+      ...(STYLE ? { style_preprompt: STYLE } : {}),
+      ...(CAMERA_FIXED ? { camera_fixed: true } : {}),
+      ...(NO_AUDIO ? { generate_audio: false } : {}),
     }),
   });
   if (!res.ok) {
