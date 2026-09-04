@@ -27,7 +27,11 @@ const IDLE_TIMEOUT_MS = Number(process.env.AIPASS_IDLE_TIMEOUT_MS ?? 180_000);
 // are already spent by then.
 const MEDIA_TIMEOUT_MS = Number(process.env.AIPASS_MEDIA_TIMEOUT_MS ?? 900_000);
 const EXTENSION_CONCURRENCY = Math.max(1, Number(process.env.AIPASS_EXTENSION_CONCURRENCY ?? 4) || 4);
-const EXTENSION_STALE_MS = 45_000;
+const EXTENSION_STALE_MS = Math.max(10_000, Number(process.env.AIPASS_EXTENSION_STALE_MS ?? 45_000) || 45_000);
+// A container restart briefly removes the extension even though Chromium and
+// its persisted profile are about to return. Local runs retain fail-fast
+// behavior; Docker opts into a grace window so requests survive that gap.
+const EXTENSION_WAIT_MS = Math.max(0, Number(process.env.AIPASS_EXTENSION_WAIT_MS ?? 0) || 0);
 const MAX_BODY = 8 * 1024 * 1024;
 
 let defaultModel = process.env.AIPASS_MODEL ?? 'gemini-3.1-flash-lite';
@@ -205,6 +209,27 @@ function extractModels(decoded) {
 const jobs = new Map();
 const extClients = new Set();
 const pendingJobs = new Set();
+// Extension callbacks are retried. Remember their delivery ids so an
+// ambiguous retry (the bridge accepted it but the response was lost) cannot
+// duplicate a streamed chunk. Entries are bounded and short-lived.
+const extensionDeliveries = new Map();
+const EXTENSION_DELIVERY_TTL_MS = 30 * 60 * 1000;
+const MAX_EXTENSION_DELIVERIES = 20_000;
+
+function rememberExtensionDelivery(id) {
+  if (typeof id !== 'string' || !id || id.length > 128) return false;
+  const now = Date.now();
+  const seenAt = extensionDeliveries.get(id);
+  if (seenAt && now - seenAt < EXTENSION_DELIVERY_TTL_MS) return true;
+  extensionDeliveries.set(id, now);
+  if (extensionDeliveries.size > MAX_EXTENSION_DELIVERIES) {
+    for (const [key, at] of extensionDeliveries) {
+      if (now - at >= EXTENSION_DELIVERY_TTL_MS || extensionDeliveries.size > MAX_EXTENSION_DELIVERIES) extensionDeliveries.delete(key);
+      else break;
+    }
+  }
+  return false;
+}
 
 const readyClients = () => {
   const cutoff = Date.now() - EXTENSION_STALE_MS;
@@ -289,8 +314,15 @@ class Job {
   dispatch() {
     const client = pickClient();
     if (client) return sendJob(this, client);
-    if (!readyClients().length) return this.fail('no extension connected or ready — open a de.aipass.net tab and check the popup');
     pendingJobs.add(this);
+    if (!readyClients().length) {
+      if (!EXTENSION_WAIT_MS) return this.fail('no extension connected or ready — open a de.aipass.net tab and check the popup');
+      logger.info('job', `queued · kind=${this.kind} waiting up to ${EXTENSION_WAIT_MS}ms for extension reconnect`);
+      this.extensionWaitTimer = setTimeout(() => {
+        if (!this.settled && !this.client) this.fail('no extension connected or ready after reconnect grace period');
+      }, EXTENSION_WAIT_MS);
+      return;
+    }
     logger.debug('job', `queued · kind=${this.kind} waiting for extension capacity`);
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
@@ -308,6 +340,10 @@ class Job {
       lastUpstreamFailureAt = new Date().toISOString();
     }
     logger.warn(auth ? 'auth' : upstream ? 'upstream' : 'job', `failed · kind=${this.kind} ${text}`);
+    // A timeout/error should release the corresponding page fetch too. Without
+    // this, a dead AiPASS stream keeps consuming a browser connection after the
+    // API caller has already received its failure.
+    if (this.client) sendToClient(this.client, 'abort', { jobId: this.id });
     this.cleanup();
     this.onError(message);
   }
@@ -319,6 +355,7 @@ class Job {
   cleanup() {
     this.settled = true;
     clearTimeout(this.timer);
+    clearTimeout(this.extensionWaitTimer);
     pendingJobs.delete(this);
     this.client?.jobs.delete(this.id);
     jobs.delete(this.id);
@@ -930,6 +967,9 @@ function extEvents(req, res) {
     // a long web_search when no deltas flow to reset the worker's idle timer.
     for (const job of jobs.values()) if (job.client === client) job.client = null;
   });
+  res.flushHeaders();
+  req.socket.setNoDelay(true);
+  req.socket.setKeepAlive(true, 15_000);
 }
 
 async function extClientSignal(req, res) {
@@ -954,10 +994,23 @@ async function extClientSignal(req, res) {
   return json(res, 200, { ok: true });
 }
 
+async function extClientUnready(req, res) {
+  let body;
+  try { body = JSON.parse(await readBody(req)); }
+  catch { return json(res, 400, { ok: false }); }
+  const client = [...extClients].find((item) => item.id === body.clientId);
+  if (!client) return json(res, 200, { ok: false, reason: 'unknown client' });
+  client.ready = false;
+  client.lastSeenAt = Date.now();
+  logger.warn('extension', `AiPASS tab unavailable · ready=${readyClients().length}`);
+  return json(res, 200, { ok: true });
+}
+
 async function extPost(req, res, kind) {
   let body;
   try { body = JSON.parse(await readBody(req)); }
   catch { return json(res, 400, { ok: false }); }
+  if (rememberExtensionDelivery(body.deliveryId)) return json(res, 200, { ok: true, duplicate: true });
   const job = jobs.get(body.jobId);
   if (!job) return json(res, 200, { ok: false, reason: 'unknown job' });
   if (job.client) job.client.lastSeenAt = Date.now();
@@ -985,6 +1038,7 @@ function healthStatus() {
     extensions: readyClients().length,
     extensionConnections: extClients.size,
     extensionCapacity: readyClients().length * EXTENSION_CONCURRENCY,
+    extensionReconnectGraceMs: EXTENSION_WAIT_MS,
     extensionActiveJobs: [...extClients].reduce((total, client) => total + client.jobs.size, 0),
     queuedJobs: pendingJobs.size,
     activeJobs: jobs.size,
@@ -1146,6 +1200,7 @@ const server = http.createServer(async (req, res) => {
 
     if (path === '/ext/events' && req.method === 'GET') return extEvents(req, res);
     if ((path === '/ext/ready' || path === '/ext/heartbeat') && req.method === 'POST') return await extClientSignal(req, res);
+    if (path === '/ext/unready' && req.method === 'POST') return await extClientUnready(req, res);
     if (path === '/ext/chunk' && req.method === 'POST') return await extPost(req, res, 'chunk');
     if (path === '/ext/done' && req.method === 'POST') return await extPost(req, res, 'done');
     if (path === '/ext/error' && req.method === 'POST') return await extPost(req, res, 'error');
@@ -1170,6 +1225,13 @@ const server = http.createServer(async (req, res) => {
     else res.end();
   }
 });
+
+// Reuse callback connections efficiently and keep the SSE control socket from
+// being delayed by Nagle buffering. These values remain below the header limit
+// and do not impose a total request duration on long generations.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+server.requestTimeout = 0;
 
 server.listen(PORT, HOST, () => {
   logger.info('bridge', `listening · http://${HOST}:${PORT}`);

@@ -38,10 +38,11 @@ fi
 echo "[start-browser] launching $BROWSER_BIN with the extension..."
 exec "$BROWSER_BIN" \
     --no-sandbox --test-type \
-    --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer \
+    --disable-gpu \
     --no-first-run --no-default-browser-check --disable-fre \
     --password-store=basic --use-mock-keychain \
-    --disable-component-update \
+    --disable-component-update --disable-sync --disable-breakpad \
+    --metrics-recording-only --disable-domain-reliability \
     --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
     --disable-session-crashed-bubble --hide-crash-restore-bubble \
     --load-extension=/app/extension \

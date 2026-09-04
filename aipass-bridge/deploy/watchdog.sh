@@ -10,6 +10,7 @@ ALERT_COOLDOWN_SECONDS="${AIPASS_ALERT_COOLDOWN_SECONDS:-900}"
 USAGE_REPORT_SECONDS=3600
 WEBHOOK_URL="${AIPASS_ALERT_WEBHOOK_URL:-}"
 INCLUDE_INFO="${AIPASS_ALERT_INCLUDE_INFO:-1}"
+API_KEY="${AIPASS_API_KEY:-}"
 
 failure_count=0
 last_state="starting"
@@ -24,6 +25,24 @@ seen_auth_failures=-1
 seen_upstream_failures=-1
 
 now() { date +%s; }
+
+# Management endpoints use the same API-key protection as client endpoints.
+# Keep the key out of logs and centralize the curl behavior so a rejected
+# recovery action is reported instead of being mistaken for success.
+admin_post() {
+  local path="$1"
+  local args=(--silent --show-error --fail --max-time 10 -X POST)
+  if [ -n "$API_KEY" ]; then args+=(-H "Authorization: Bearer $API_KEY"); fi
+  curl "${args[@]}" "$BASE_URL$path" > /dev/null
+}
+
+# Supervisor starts all programs together. Give the Node listener a short
+# chance to bind before classifying it as an outage; normally this completes
+# on the first or second iteration.
+for _ in {1..60}; do
+  curl --silent --fail --max-time 2 "$BASE_URL/health" > /dev/null 2>&1 && break
+  sleep 1
+done
 
 post_alert() {
   local level="$1" title="$2" message="$3" key="$4" at payload endpoint
@@ -85,7 +104,9 @@ restart_browser_if_due() {
   # unavailable. Supervisor still restarts a browser process that exits.
   [ $((at - last_browser_restart_at)) -ge 300 ] || return 0
   emit warning "$title" "$message" "$key"
-  curl --silent --show-error --max-time 10 -X POST "$BASE_URL/browser/restart" > /dev/null || true
+  if ! supervisorctl restart browser > /dev/null; then
+    emit alert "Browser restart failed" "Supervisor could not restart Chromium." "browser_restart_failed"
+  fi
   last_browser_restart_at=$at
 }
 
@@ -154,28 +175,32 @@ while true; do
     continue
   fi
 
-  read -r extensions active_jobs oldest_idle_ms api_requests api_requests_last_hour auth_failures upstream_failures < <(STATUS_JSON="$status" node -e '
+  read -r extensions extension_connections active_jobs oldest_idle_ms api_requests api_requests_last_hour auth_failures upstream_failures < <(STATUS_JSON="$status" node -e '
     try {
       const s = JSON.parse(process.env.STATUS_JSON);
-      console.log([Number(s.extensions) || 0, Number(s.activeJobs) || 0, Number(s.oldestJobIdleMs) || 0, Number(s.apiRequests) || 0, Number(s.apiRequestsLastHour) || 0, Number(s.authFailures) || 0, Number(s.upstreamFailures) || 0].join(" "));
-    } catch { console.log("0 0 0 0 0 0 0"); }
+      console.log([Number(s.extensions) || 0, Number(s.extensionConnections) || 0, Number(s.activeJobs) || 0, Number(s.oldestJobIdleMs) || 0, Number(s.apiRequests) || 0, Number(s.apiRequestsLastHour) || 0, Number(s.authFailures) || 0, Number(s.upstreamFailures) || 0].join(" "));
+    } catch { console.log("0 0 0 0 0 0 0 0"); }
   ')
 
   report_bridge_events "$api_requests" "$api_requests_last_hour" "$auth_failures" "$upstream_failures"
 
   if [ "$extensions" -lt 1 ]; then
-    if [ "$last_state" != "extension_disconnected" ]; then
+    if [ "$last_state" != "extension_suspect" ] && [ "$last_state" != "extension_disconnected" ]; then
       failure_count=0
-      emit alert "Extension disconnected" "No AiPASS extension is attached; recovery has started." "extension_disconnected"
-      last_state="extension_disconnected"
+      last_state="extension_suspect"
     fi
     failure_count=$((failure_count + 1))
-    # A stale service worker is cheap to reload once. With no client left, a
-    # full Chromium restart is the only reliable way to load the extension anew.
-    if [ "$failure_count" -eq 1 ]; then
-      emit warning "Reloading extension" "No extension was attached on the first check." "extension_reload"
-      curl --silent --show-error --max-time 10 -X POST "$BASE_URL/ext/reload" > /dev/null || true
-    elif [ "$failure_count" -ge 3 ]; then
+    # A planned four-minute SSE renewal normally reconnects in under a second.
+    # One missed poll is therefore noise; recovery begins only if two
+    # consecutive 30-second checks see no usable worker.
+    if [ "$failure_count" -eq 2 ]; then
+      emit alert "Extension disconnected" "No AiPASS extension is attached; recovery has started." "extension_disconnected"
+      last_state="extension_disconnected"
+      if [ "$extension_connections" -gt 0 ]; then
+        emit warning "Reloading extension" "The extension is connected but its AiPASS tab did not become ready after two checks." "extension_reload"
+        admin_post "/ext/reload" || emit alert "Extension reload failed" "The bridge rejected or could not perform the extension reload." "extension_reload_failed"
+      fi
+    elif [ "$failure_count" -ge 4 ]; then
       restart_browser_if_due "Restarting browser" "The extension remains disconnected after ${failure_count} checks." "browser_restart_extension"
     fi
   elif [ "$active_jobs" -gt 0 ] && [ "$oldest_idle_ms" -ge "$STUCK_JOB_MS" ]; then
@@ -187,11 +212,19 @@ while true; do
     failure_count=$((failure_count + 1))
     if [ "$failure_count" -eq 1 ]; then
       emit warning "Reloading AiPASS tab" "Trying to restore the stalled page relay." "tab_reload"
-      curl --silent --show-error --max-time 10 -X POST "$BASE_URL/tab/reload" > /dev/null || true
+      admin_post "/tab/reload" || emit alert "Tab reload failed" "The bridge rejected or could not perform the AiPASS tab reload." "tab_reload_failed"
     elif [ "$failure_count" -ge 3 ]; then
       restart_browser_if_due "Restarting browser" "The upstream job remains stalled after ${failure_count} checks." "browser_restart_stuck_job"
     fi
   else
+    # A single failed poll is expected during the extension's planned SSE
+    # renewal and should not produce a recovery notification either.
+    if [ "$last_state" = "extension_suspect" ]; then
+      last_state="healthy"
+      failure_count=0
+      sleep "$INTERVAL_SECONDS"
+      continue
+    fi
     if [ "$last_state" != "healthy" ]; then
       if [ "$last_state" = "starting" ]; then
         emit info "Bridge ready" "The bridge and AiPASS extension are connected and ready for requests." "bridge_ready"

@@ -55,6 +55,14 @@ The bridge accepts multiple simultaneous OpenAI-compatible clients. Each ready
 extension worker serves up to four isolated API jobs by default; excess jobs
 queue rather than being sent to a busy or stale worker. Set
 `AIPASS_EXTENSION_CONCURRENCY` in `.env` to tune the per-worker limit.
+In Docker, new calls also wait up to 20 seconds for a temporarily disconnected
+extension to return. Extension callbacks are delivered in order and retried
+with deduplication, so a lost HTTP response cannot duplicate streamed output.
+Before accepting work, the extension now verifies from inside the first-party
+tab that `/chat` is reachable with the current session. It rechecks once a
+minute, withdraws an unhealthy tab from scheduling, and restores it when the
+site recovers. After repeated failures it reloads the tab only when no API job
+is active.
 
 Then:
 
@@ -112,6 +120,8 @@ warnings and alerts. The supplied settings are conservative:
 | `AIPASS_WATCHDOG_STUCK_JOB_MS` | 960000 | silence before a job is treated as stuck (16 min) |
 | `AIPASS_ALERT_COOLDOWN_SECONDS` | 900 | repeat-alert suppression window |
 | `AIPASS_ALERT_INCLUDE_INFO` | 1 | send startup and recovery events to the webhook |
+| `AIPASS_EXTENSION_WAIT_MS` | 20000 | queue new work during a short extension reconnect |
+| `AIPASS_EXTENSION_STALE_MS` | 45000 | stop scheduling work to a silent extension worker |
 
 For an external monitor, alert on a failed `/ready` request or Docker changing
 to `unhealthy`. Do not use `test.sh` as a frequent probe: it deliberately
@@ -137,6 +147,8 @@ from your laptop), or run the agent on the server itself.
 
 - The browser profile lives in `deploy/chrome-data/` (gitignored). Your login
   persists across restarts; `./reset.sh --clean` wipes it.
+- Chromium uses the container's 2 GB `/dev/shm` directly instead of routing
+  renderer shared memory through slower disk-backed temporary files.
 - `docker compose logs -f aipass-bridge` shows all processes; per-process logs
   are under `/var/log/` inside the container.
 - This runs your account through an automated, always-on client — fine for your

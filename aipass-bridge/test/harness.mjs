@@ -167,6 +167,7 @@ export class FakeExtension {
     this.chats = [];       // every chat job received
     this.created = [];     // every create-conversation job received
     this.loaders = [];     // every loader url received
+    this.aborted = [];     // jobs the bridge asked the page to cancel
   }
 
   post(p, body) {
@@ -218,7 +219,12 @@ export class FakeExtension {
           }
           if (!data.length) continue;
           if (name === 'ready') {
-            await this.post('/ext/ready', { clientId: JSON.parse(data.join('\n')).clientId });
+            this.clientId = JSON.parse(data.join('\n')).clientId;
+            await this.post('/ext/ready', { clientId: this.clientId });
+            continue;
+          }
+          if (name === 'abort') {
+            this.aborted.push(JSON.parse(data.join('\n')).jobId);
             continue;
           }
           if (name !== 'job') continue;

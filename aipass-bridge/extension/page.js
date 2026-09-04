@@ -7,7 +7,7 @@
   // injection claims a higher generation; older copies stand down.
   const GEN = (window.__aipassBridgeGen ?? 0) + 1;
   window.__aipassBridgeGen = GEN;
-  window.__aipassBridgeVersion = '0.2.3-temporary-api';
+  window.__aipassBridgeVersion = '0.2.4-site-health';
 
   const TAG = '__aipass_bridge';
   const inflight = new Map();
@@ -46,18 +46,24 @@
   // browser attach its own cookie. On an authorization response, check that
   // same tab instead of asking the local bridge (which never has a cookie) to
   // guess whether the account is signed in.
-  async function authorizedChatPage() {
+  async function inspectChatPage() {
     try {
       const page = await fetch('/chat', {
         credentials: 'include',
+        cache: 'no-store',
         redirect: 'follow',
         headers: { accept: 'text/html' },
       });
       const target = new URL(page.url, window.location.origin);
-      return page.ok && target.origin === window.location.origin && /^\/chat(?:\/|$)/.test(target.pathname);
-    } catch {
-      return false;
+      const ok = page.ok && target.origin === window.location.origin && /^\/chat(?:\/|$)/.test(target.pathname);
+      return { ok, message: ok ? '' : `AiPASS session check reached ${target.pathname} (${page.status})` };
+    } catch (err) {
+      return { ok: false, message: `could not reach de.aipass.net: ${err?.message ?? err}` };
     }
+  }
+
+  async function authorizedChatPage() {
+    return (await inspectChatPage()).ok;
   }
 
   async function responseError(res, { bytes = 0, detail = true } = {}) {
@@ -443,6 +449,9 @@
     if (msg[TAG] === 'req') {
       const fn = msg.job.kind === 'loader' ? runLoader : msg.job.kind === 'create' ? runCreate : run;
       fn(msg.job);
+    }
+    else if (msg[TAG] === 'probe') {
+      inspectChatPage().then((status) => reply({ kind: 'page-status', probeId: msg.probeId, ...status }));
     }
     else if (msg[TAG] === 'abort') inflight.get(msg.jobId)?.abort();
   });

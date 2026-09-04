@@ -6,8 +6,14 @@
 // Private Network Access checks; an extension request with host_permissions
 // does not.
 const DEFAULT_BRIDGE = 'http://127.0.0.1:8787';
-const RECONNECT_MS = 3000;
+const RECONNECT_MIN_MS = 250;
+const RECONNECT_MAX_MS = 10_000;
 const CYCLE_MS = 4 * 60 * 1000; // reconnect before Chrome's long-request ceiling
+const SSE_STALE_MS = 45_000;
+const POST_TIMEOUT_MS = 8_000;
+const SITE_PROBE_MS = 60_000;
+const SITE_PROBE_TIMEOUT_MS = 12_000;
+const CONTENT_VERSION = 2;
 
 let controller = null;
 let connected = false;
@@ -15,6 +21,14 @@ let lastError = '';
 let bridgeClientId = null;
 let workerReady = false;
 let readinessSetup = null;
+let reconnectTimer = null;
+let reconnectFailures = 0;
+let siteFailures = 0;
+let lastSiteProbeAt = 0;
+const siteProbes = new Map();
+const deliverySession = crypto.randomUUID();
+let deliverySequence = 0;
+const deliveryTails = new Map();
 // jobId -> { tabId }. Every request runs against the signed-in chat tab.
 const jobTabs = new Map();
 
@@ -64,20 +78,65 @@ const bridgeUrl = async () => {
   }
 };
 
-async function post(path, body) {
-  try {
-    const res = await fetch(`${await bridgeUrl()}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`bridge responded ${res.status}`);
-    return true;
-  } catch (err) {
-    lastError = String(err?.message ?? err);
-    console.warn('[aipass-bg] POST error:', path, lastError);
-    return false;
+async function post(path, body, { attempts = 1, acceptUnknownJob = false } = {}) {
+  const url = `${await bridgeUrl()}${path}`;
+  const payload = JSON.stringify(body);
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), POST_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: payload,
+        signal: timeout.signal,
+      });
+      if (!res.ok) throw new Error(`bridge responded ${res.status}`);
+      const reply = await res.json().catch(() => null);
+      // A bridge restart cannot recover an old in-memory job. Drop that stale
+      // callback immediately so it does not head-of-line block newer work.
+      if (acceptUnknownJob && reply?.reason === 'unknown job') return true;
+      if (reply?.ok === false) throw new Error(reply.reason || 'bridge rejected callback');
+      return true;
+    } catch (err) {
+      lastError = String(err?.message ?? err);
+      if (attempt + 1 < attempts) {
+        const delay = Math.min(4_000, 200 * (2 ** attempt)) + Math.floor(Math.random() * 150);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      } else {
+        console.warn('[aipass-bg] POST error:', path, lastError);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return false;
+}
+
+// Page events must reach the bridge in their original order. A stable delivery
+// id makes retries safe when Docker drops the response after accepting a POST.
+function deliver(path, body) {
+  const payload = { ...body, deliveryId: `${deliverySession}:${++deliverySequence}` };
+  const key = body.jobId;
+  const run = () => post(path, payload, { attempts: 8, acceptUnknownJob: true });
+  const previous = deliveryTails.get(key) ?? Promise.resolve();
+  const current = previous.then(run, run);
+  deliveryTails.set(key, current);
+  current.finally(() => {
+    if (deliveryTails.get(key) === current) deliveryTails.delete(key);
+  });
+  return current;
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const ceiling = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * (2 ** reconnectFailures));
+  const delay = Math.floor(Math.random() * Math.max(RECONNECT_MIN_MS, ceiling));
+  reconnectFailures = Math.min(reconnectFailures + 1, 8);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delay);
 }
 
 async function findChatTab() {
@@ -120,7 +179,10 @@ async function releaseJobTab(jobId) {
 async function ensureContentScript(tab) {
   const ping = () => chrome.tabs.sendMessage(tab.id, { type: 'ping' });
   let ok = false;
-  try { await ping(); ok = true; } catch { /* not there yet */ }
+  try {
+    const response = await ping();
+    ok = response?.ok === true && response?.version === CONTENT_VERSION;
+  } catch { /* not there yet */ }
 
   if (!ok && (tab.discarded || tab.status === 'unloaded')) {
     await chrome.tabs.reload(tab.id);
@@ -132,26 +194,61 @@ async function ensureContentScript(tab) {
   await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', files: ['page.js'] });
   if (!ok) {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'ISOLATED', files: ['content.js'] });
-    await ping();
+    const response = await ping();
+    if (response?.version !== CONTENT_VERSION) throw new Error('content relay version did not update');
   }
 }
 
-async function announceReady(clientId = bridgeClientId) {
-  if (!connected || !clientId || workerReady) return;
+function probeAiPass(tab) {
+  return new Promise((resolve) => {
+    const probeId = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      siteProbes.delete(probeId);
+      resolve({ ok: false, message: 'AiPASS tab health check timed out' });
+    }, SITE_PROBE_TIMEOUT_MS);
+    siteProbes.set(probeId, (status) => {
+      clearTimeout(timer);
+      resolve(status);
+    });
+    chrome.tabs.sendMessage(tab.id, { type: 'probe', probeId }).catch((err) => {
+      const settle = siteProbes.get(probeId);
+      siteProbes.delete(probeId);
+      if (settle) settle({ ok: false, message: `could not probe AiPASS tab: ${err?.message ?? err}` });
+    });
+  });
+}
+
+async function announceReady(clientId = bridgeClientId, { probe = false } = {}) {
+  if (!connected || !clientId || (workerReady && !probe)) return;
   if (readinessSetup) return readinessSetup;
   readinessSetup = (async () => {
     const tab = await findChatTab();
     if (!tab) throw new Error('no de.aipass.net tab is open');
     await ensureContentScript(tab);
+    lastSiteProbeAt = Date.now();
+    const site = await probeAiPass(tab);
+    if (!site.ok) throw new Error(site.message || 'AiPASS website is unavailable');
     if (!connected || bridgeClientId !== clientId) return;
-    if (await post('/ext/ready', { clientId })) {
+    if (await post('/ext/ready', { clientId }, { attempts: 3 })) {
       workerReady = true;
+      reconnectFailures = 0;
+      siteFailures = 0;
       lastError = '';
+    } else {
+      controller?.abort();
     }
   })().catch((err) => {
     workerReady = false;
     lastError = `AiPASS tab is not ready: ${err?.message ?? err}`;
     console.warn('[aipass-bg] readiness:', lastError);
+    siteFailures++;
+    if (connected && clientId === bridgeClientId) post('/ext/unready', { clientId }, { attempts: 2 });
+    // Chrome's network error page will not recover by itself. Reload only when
+    // no API job owns the tab, and rate it behind three failed probes.
+    if (siteFailures >= 3 && jobTabs.size === 0) {
+      siteFailures = 0;
+      findChatTab().then((tab) => tab && chrome.tabs.reload(tab.id)).catch(() => {});
+    }
   }).finally(() => {
     readinessSetup = null;
   });
@@ -161,7 +258,7 @@ async function announceReady(clientId = bridgeClientId) {
 async function handleJob(job) {
   const tab = await findChatTab();
   if (!tab) {
-    await post('/ext/error', { jobId: job.jobId, message: 'no de.aipass.net tab is open' });
+    await deliver('/ext/error', { jobId: job.jobId, message: 'no de.aipass.net tab is open' });
     return;
   }
   jobTabs.set(job.jobId, { tabId: tab.id });
@@ -170,7 +267,7 @@ async function handleJob(job) {
     await chrome.tabs.sendMessage(tab.id, { type: 'run', job });
   } catch (err) {
     await releaseJobTab(job.jobId);
-    await post('/ext/error', {
+    await deliver('/ext/error', {
       jobId: job.jobId,
       message: `could not reach the de.aipass.net tab (${tab.url ?? tab.id}): ${err?.message ?? err}`,
     });
@@ -202,6 +299,10 @@ async function connect() {
   controller = new AbortController();
   const signal = controller.signal;
   const cycle = setTimeout(() => controller?.abort(), CYCLE_MS);
+  let lastEventAt = Date.now();
+  const staleCheck = setInterval(() => {
+    if (Date.now() - lastEventAt > SSE_STALE_MS) controller?.abort();
+  }, 10_000);
 
   ensureOffscreenDocument();
 
@@ -223,6 +324,7 @@ async function connect() {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      lastEventAt = Date.now();
       pending += decoder.decode(value, { stream: true });
 
       let cut;
@@ -244,20 +346,25 @@ async function connect() {
     if (err?.name !== 'AbortError') lastError = String(err?.message ?? err);
   } finally {
     clearTimeout(cycle);
+    clearInterval(staleCheck);
     connected = false;
     bridgeClientId = null;
     workerReady = false;
     controller = null;
-    setTimeout(connect, RECONNECT_MS);
+    scheduleReconnect();
   }
 }
 
 // An SSE socket can linger after its worker has become unusable. The heartbeat
 // lets the bridge exclude that stale connection from its worker pool instead
 // of round-robining API requests into it until they time out.
-setInterval(() => {
+setInterval(async () => {
   if (!connected || !bridgeClientId) return;
-  if (workerReady) post('/ext/heartbeat', { clientId: bridgeClientId });
+  if (workerReady) {
+    const ok = await post('/ext/heartbeat', { clientId: bridgeClientId }, { attempts: 2 });
+    if (!ok) controller?.abort();
+    else if (Date.now() - lastSiteProbeAt >= SITE_PROBE_MS) announceReady(bridgeClientId, { probe: true });
+  }
   else announceReady(bridgeClientId);
 }, 20_000);
 
@@ -286,10 +393,15 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'from-page') {
     const p = msg.payload;
-    if (p.kind === 'chunk') post('/ext/chunk', { jobId: p.jobId, parts: p.parts });
-    else if (p.kind === 'done') { releaseJobTab(p.jobId); post('/ext/done', { jobId: p.jobId, finishReason: p.finishReason }); }
-    else if (p.kind === 'error') { releaseJobTab(p.jobId); post('/ext/error', { jobId: p.jobId, message: p.message }); }
-    else if (p.kind === 'loader') { releaseJobTab(p.jobId); post('/ext/loader', { jobId: p.jobId, raw: p.raw, message: p.message }); }
+    if (p.kind === 'page-status') {
+      const settle = siteProbes.get(p.probeId);
+      siteProbes.delete(p.probeId);
+      settle?.({ ok: p.ok === true, message: p.message });
+    }
+    else if (p.kind === 'chunk') deliver('/ext/chunk', { jobId: p.jobId, parts: p.parts });
+    else if (p.kind === 'done') { releaseJobTab(p.jobId); deliver('/ext/done', { jobId: p.jobId, finishReason: p.finishReason }); }
+    else if (p.kind === 'error') { releaseJobTab(p.jobId); deliver('/ext/error', { jobId: p.jobId, message: p.message }); }
+    else if (p.kind === 'loader') { releaseJobTab(p.jobId); deliver('/ext/loader', { jobId: p.jobId, raw: p.raw, message: p.message }); }
     return;
   }
   if (msg?.type === 'status') {

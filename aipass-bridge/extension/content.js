@@ -6,6 +6,7 @@ window.__aipassBridgeContentGen = GEN;
 const current = () => window.__aipassBridgeContentGen === GEN;
 
 const TAG = '__aipass_bridge';
+const CONTENT_VERSION = 2;
 
 // Sending to an evicted worker both wakes it and can transiently fail, so
 // retry rather than dropping deltas on the floor. The upstream fetch keeps
@@ -32,7 +33,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!current()) return;
   if (msg?.type === 'run') window.postMessage({ [TAG]: 'req', job: msg.job }, window.location.origin);
   else if (msg?.type === 'abort') window.postMessage({ [TAG]: 'abort', jobId: msg.jobId }, window.location.origin);
-  else if (msg?.type === 'ping') { sendResponse({ ok: true }); return true; }
+  else if (msg?.type === 'probe') window.postMessage({ [TAG]: 'probe', probeId: msg.probeId }, window.location.origin);
+  else if (msg?.type === 'ping') { sendResponse({ ok: true, version: CONTENT_VERSION }); return true; }
 });
 
 // Chrome evicts an idle MV3 worker after ~30s, and inbound SSE data does not

@@ -32,6 +32,25 @@ test('refuses a request with no extension attached', async () => {
   assert.match(body.error.message, /no extension connected/);
 });
 
+test('Docker reconnect grace queues a request until the extension returns', async (t) => {
+  const patient = await startBridge({ AIPASS_EXTENSION_WAIT_MS: '1500' });
+  t.after(() => patient.stop());
+
+  const pending = fetch(`${patient.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'wait for me' }] }),
+  });
+  await waitFor(async () => (await fetch(`${patient.base}/status`).then((r) => r.json())).queuedJobs === 1);
+
+  const ext = await new FakeExtension(patient.base, {
+    onChat: async (_job, e) => { await e.text('reconnected'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const response = await (await pending).json();
+  assert.equal(response.choices[0].message.content, 'reconnected');
+});
+
 test('requires a configured API key for client routes but not health probes', async (t) => {
   const secured = await startBridge({ AIPASS_API_KEY: 'test-private-key' });
   t.after(() => secured.stop());
@@ -58,6 +77,33 @@ test('readiness requires an extension while liveness does not', async () => {
   assert.equal(body.reason, 'no extension connected');
   assert.equal(body.oldestJobAgeMs, 0);
   assert.equal(body.oldestJobIdleMs, 0);
+});
+
+test('an extension can withdraw readiness while its AiPASS tab is unavailable', async (t) => {
+  const patient = await startBridge({ AIPASS_EXTENSION_WAIT_MS: '1500' });
+  t.after(() => patient.stop());
+  const ext = await new FakeExtension(patient.base, {
+    onChat: async (_job, e) => { await e.text('back online'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  await fetch(`${patient.base}/ext/unready`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ clientId: ext.clientId }),
+  });
+  assert.equal((await fetch(`${patient.base}/ready`)).status, 503);
+
+  const pending = fetch(`${patient.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hello again' }] }),
+  });
+  await waitFor(async () => (await fetch(`${patient.base}/status`).then((r) => r.json())).queuedJobs === 1);
+  await fetch(`${patient.base}/ext/ready`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ clientId: ext.clientId }),
+  });
+  const response = await (await pending).json();
+  assert.equal(response.choices[0].message.content, 'back online');
 });
 
 test('streams text, tool status and a finish reason', async () => {
@@ -370,6 +416,28 @@ test('creates a permanent conversation explicitly without changing API isolation
   await post({ messages: [{ role: 'user', content: 'hi' }] });
   assert.notEqual(ext.chats.at(-1).conversationId, made.id, 'an API call gets its own conversation');
   assert.equal(ext.created.length, 2, 'one new conversation was created for the API call');
+});
+
+test('deduplicates retried extension callback deliveries', async (t) => {
+  let received;
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job) => { received = job; },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const pending = post({ stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  await waitFor(() => received);
+  const callback = (path, body) => fetch(`${bridge.base}${path}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const chunk = { jobId: received.jobId, deliveryId: 'test-session:1', parts: [{ kind: 'text', text: 'once' }] };
+  assert.equal((await callback('/ext/chunk', chunk)).status, 200);
+  const duplicate = await callback('/ext/chunk', chunk).then((r) => r.json());
+  assert.equal(duplicate.duplicate, true);
+  await callback('/ext/done', { jobId: received.jobId, deliveryId: 'test-session:2', finishReason: 'stop' });
+
+  const output = await readStream(await pending);
+  assert.equal(output.content, 'once');
 });
 
 test('creates one fresh temporary conversation per API call', async (t) => {
@@ -702,6 +770,8 @@ test('a video model gets a longer silence allowance than a chat model', async (t
     body: JSON.stringify({ model: 'gemini-3.1-flash-lite', messages: [{ role: 'user', content: 'hi' }] }),
   })).json();
   assert.match(chat.error.message, /timed out/, 'a chat model still times out quickly');
+  await waitFor(() => ext.aborted.length > 0);
+  assert.equal(ext.aborted.at(-1), ext.chats.at(-1).jobId, 'a timed-out bridge job cancels its page fetch');
 
   const started = Date.now();
   const video = fetch(`${slow.base}/v1/chat/completions`, {

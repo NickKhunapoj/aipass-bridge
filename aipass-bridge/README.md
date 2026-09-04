@@ -683,6 +683,8 @@ decimals is a pool of 10,000 — the bridge does that division for you.
 | `AIPASS_PER_REQUEST_CONVERSATIONS` | `1` | `0` restores legacy shared-conversation behavior |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | fail a job after this long with no delta |
 | `AIPASS_EXTENSION_CONCURRENCY` | `4` | concurrent API jobs allowed per ready extension worker |
+| `AIPASS_EXTENSION_WAIT_MS` | `0` (`20000` in Docker) | reconnect grace before a request fails for lack of an extension |
+| `AIPASS_EXTENSION_STALE_MS` | `45000` | silence before a worker is excluded from scheduling |
 | `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin to call the bridge — see below |
 | `AIPASS_ALLOWED_HOSTS` | *(unset)* | extra hostnames accepted in the `Host` header |
 | `AIPASS_ADMIN` | *(unset)* | `1` enables the container-management routes |

@@ -4,6 +4,7 @@ services:
     image: aipass-bridge:latest
     container_name: aipass-bridge
     restart: unless-stopped
+    init: true
     ports:
       # All three are bound to 127.0.0.1 — none is exposed to the network by
       # default. both noVNC and the bridge lack authentication,
@@ -28,6 +29,10 @@ services:
       - AIPASS_MODEL=gemini-3.1-flash-lite
       # Each ready browser extension can serve this many isolated API requests.
       - AIPASS_EXTENSION_CONCURRENCY=${AIPASS_EXTENSION_CONCURRENCY:-4}
+      # Absorb short Chromium/extension reconnects instead of failing new API
+      # calls while the persisted browser profile is coming back online.
+      - AIPASS_EXTENSION_WAIT_MS=${AIPASS_EXTENSION_WAIT_MS:-20000}
+      - AIPASS_EXTENSION_STALE_MS=${AIPASS_EXTENSION_STALE_MS:-45000}
       # The container-management routes (/restart, /logs, /browser/restart,
       # /ext/reload, /tab/reload) exist only here, not in a local run.
       - AIPASS_ADMIN=1
@@ -46,3 +51,4 @@ services:
       - AIPASS_WATCHDOG_INTERVAL_SECONDS=${AIPASS_WATCHDOG_INTERVAL_SECONDS:-30}
       - AIPASS_WATCHDOG_STUCK_JOB_MS=${AIPASS_WATCHDOG_STUCK_JOB_MS:-960000}
     shm_size: '2gb'
+    stop_grace_period: 20s
